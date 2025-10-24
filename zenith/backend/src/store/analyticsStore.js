@@ -1,4 +1,57 @@
+import { persistAnalyticsEvent } from './analyticsPersistence.js';
+import { logger } from '../utils/logger.js';
+
 const round = (value, digits = 2) => Number(value.toFixed(digits));
+
+const serializeOpenAiUsage = (usage) => ({
+  promptTokens: usage.promptTokens,
+  completionTokens: usage.completionTokens,
+  totalTokens: usage.totalTokens,
+  inputCost: usage.inputCost,
+  outputCost: usage.outputCost,
+  totalCost: usage.totalCost,
+  calls: usage.calls,
+  byModel: Array.from(usage.byModel.entries()).map(([model, stats]) => ({
+    model,
+    promptTokens: stats.promptTokens,
+    completionTokens: stats.completionTokens,
+    totalTokens: stats.totalTokens,
+    inputCost: stats.inputCost,
+    outputCost: stats.outputCost,
+    totalCost: stats.totalCost,
+    calls: stats.calls,
+  })),
+});
+
+const deserializeOpenAiUsage = (data) => {
+  const usage = {
+    promptTokens: Number(data?.promptTokens ?? 0),
+    completionTokens: Number(data?.completionTokens ?? 0),
+    totalTokens: Number(data?.totalTokens ?? 0),
+    inputCost: Number(data?.inputCost ?? 0),
+    outputCost: Number(data?.outputCost ?? 0),
+    totalCost: Number(data?.totalCost ?? 0),
+    calls: Number(data?.calls ?? 0),
+    byModel: new Map(),
+  };
+  if (Array.isArray(data?.byModel)) {
+    for (const entry of data.byModel) {
+      if (!entry || typeof entry !== 'object') continue;
+      const model = typeof entry.model === 'string' && entry.model.trim().length > 0 ? entry.model : 'unknown';
+      usage.byModel.set(model, {
+        model,
+        promptTokens: Number(entry.promptTokens ?? 0),
+        completionTokens: Number(entry.completionTokens ?? 0),
+        totalTokens: Number(entry.totalTokens ?? 0),
+        inputCost: Number(entry.inputCost ?? 0),
+        outputCost: Number(entry.outputCost ?? 0),
+        totalCost: Number(entry.totalCost ?? 0),
+        calls: Number(entry.calls ?? 0),
+      });
+    }
+  }
+  return usage;
+};
 
 export class AnalyticsStore {
   constructor() {
@@ -19,7 +72,7 @@ export class AnalyticsStore {
     };
   }
 
-  addSignal(decision, riskLevel) {
+  addSignal(decision, riskLevel, options = {}) {
     const record = {
       created_at: new Date().toISOString(),
       symbol: decision.symbol,
@@ -31,9 +84,14 @@ export class AnalyticsStore {
     if (this.signals.length > this.maxEntries) {
       this.signals.shift();
     }
+    if (options.persist !== false) {
+      void persistAnalyticsEvent({ type: 'signal', data: record }).catch((error) => {
+        logger.warn({ error }, 'Failed to persist signal event');
+      });
+    }
   }
 
-  addExecution(result, decision) {
+  addExecution(result, decision, options = {}) {
     const direction = decision.bias === 'long' ? 1 : decision.bias === 'short' ? -1 : 0;
     if (direction === 0 || result.filledQty <= 0) return;
 
@@ -104,9 +162,26 @@ export class AnalyticsStore {
     }
 
     this.symbolStats.set(decision.symbol, existing);
+    if (options.persist !== false) {
+      const payload = {
+        symbol: decision.symbol,
+        netContracts: existing.netContracts,
+        avgEntryPrice: existing.avgEntryPrice,
+        realizedPnl: existing.realizedPnl,
+        totalVolume: existing.totalVolume,
+        wins: existing.wins ?? 0,
+        losses: existing.losses ?? 0,
+        breakeven: existing.breakeven ?? 0,
+        trades: existing.trades ?? 0,
+        lastUpdated: existing.lastUpdated,
+      };
+      void persistAnalyticsEvent({ type: 'execution', data: payload }).catch((error) => {
+        logger.warn({ error }, 'Failed to persist execution event');
+      });
+    }
   }
 
-  recordOpenAiUsage(usage) {
+  recordOpenAiUsage(usage, options = {}) {
     if (!usage) {
       return;
     }
@@ -204,13 +279,19 @@ export class AnalyticsStore {
     this.openAiUsage.inputCost += aggregated.inputCost;
     this.openAiUsage.outputCost += aggregated.outputCost;
     this.openAiUsage.totalCost += aggregated.totalCost;
+    if (options.persist !== false) {
+      const snapshot = serializeOpenAiUsage(this.openAiUsage);
+      void persistAnalyticsEvent({ type: 'openai_usage', data: snapshot }).catch((error) => {
+        logger.warn({ error }, 'Failed to persist OpenAI usage event');
+      });
+    }
   }
 
   getBaselineEquity() {
     return this.baselineEquity;
   }
 
-  addEquity(snapshot) {
+  addEquity(snapshot, options = {}) {
     if (this.baselineEquity === undefined) {
       this.baselineEquity = snapshot.baseline ?? snapshot.equity;
     }
@@ -227,6 +308,15 @@ export class AnalyticsStore {
     this.equitySnapshots.push(normalized);
     if (this.equitySnapshots.length > this.maxEntries) {
       this.equitySnapshots.shift();
+    }
+    if (options.persist !== false) {
+      const payload = {
+        ...normalized,
+        baseline: this.baselineEquity,
+      };
+      void persistAnalyticsEvent({ type: 'equity', data: payload }).catch((error) => {
+        logger.warn({ error }, 'Failed to persist equity snapshot');
+      });
     }
     return normalized;
   }
@@ -320,6 +410,56 @@ export class AnalyticsStore {
 
   getRecentSignals(limit = 5) {
     return this.signals.slice(-limit).reverse();
+  }
+
+  rehydrate(events = []) {
+    for (const event of events) {
+      if (!event || typeof event !== 'object') {
+        continue;
+      }
+      const { type, data } = event;
+      if (!type) continue;
+      if (type === 'signal' && data) {
+        this.signals.push(data);
+        if (this.signals.length > this.maxEntries) {
+          this.signals = this.signals.slice(-this.maxEntries);
+        }
+      } else if (type === 'equity' && data) {
+        if (typeof data.baseline === 'number' && Number.isFinite(data.baseline)) {
+          this.baselineEquity = data.baseline;
+        }
+        const entry = {
+          balance: Number(data.balance ?? 0),
+          equity: Number(data.equity ?? 0),
+          pnlPercent: Number(data.pnlPercent ?? 0),
+          timestamp: data.timestamp ?? new Date().toISOString(),
+        };
+        this.equitySnapshots.push(entry);
+        if (this.equitySnapshots.length > this.maxEntries) {
+          this.equitySnapshots = this.equitySnapshots.slice(-this.maxEntries);
+        }
+      } else if (type === 'execution' && data?.symbol) {
+        this.symbolStats.set(data.symbol, {
+          netContracts: Number(data.netContracts ?? 0),
+          avgEntryPrice: Number(data.avgEntryPrice ?? 0),
+          realizedPnl: Number(data.realizedPnl ?? 0),
+          totalVolume: Number(data.totalVolume ?? 0),
+          wins: Number(data.wins ?? 0),
+          losses: Number(data.losses ?? 0),
+          breakeven: Number(data.breakeven ?? 0),
+          trades: Number(data.trades ?? 0),
+          lastUpdated: data.lastUpdated ?? new Date().toISOString(),
+        });
+      } else if (type === 'openai_usage' && data) {
+        this.openAiUsage = deserializeOpenAiUsage(data);
+      }
+    }
+    if (this.signals.length > this.maxEntries) {
+      this.signals = this.signals.slice(-this.maxEntries);
+    }
+    if (this.equitySnapshots.length > this.maxEntries) {
+      this.equitySnapshots = this.equitySnapshots.slice(-this.maxEntries);
+    }
   }
 }
 

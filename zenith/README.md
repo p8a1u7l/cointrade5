@@ -4,7 +4,7 @@
 
 - **오케스트레이터 API** (Node.js + TypeScript): 바이낸스 선물과 통신하고 GPT-5 Pro 전략 호출을 조율하며, 인메모리 분석 스토어에 테레메트리를 기록합니다. 합성 데이터 폴백 없이 실제 API 응답만을 사용합니다.
 - **헬리오스 대시보드** (Vite + React + TypeScript): 실시간 성과 지표, 리스크 설정, 거래 내역을 데스크톱 UI 형태로 스트리밍합니다.
-- **Supabase 자산** (SQL + Edge Functions): 과거 버전에서 사용되던 예제 자료로 남아 있으며, 현재 스택에서는 선택 사항입니다.
+- **아카이브 데이터 레이어** (NDJSON 파일): 인메모리 분석 스토어를 `backend/data/analytics-history.ndjson`으로 지속 기록해 외부 리포트나 백업에 활용할 수 있습니다.
 
 > ⚠️ 제니스 트레이더 스위트는 교육용 예제로 설계되었습니다. 실제 API 키로 배포하기 전에는 반드시 자체적인 검증, 보안 점검, 모의 거래를 수행하세요.
 
@@ -40,11 +40,18 @@
 ```
 zenith/
 ├── backend/        # 자동매매 오케스트레이터 (Node.js HTTP)
-├── frontend/       # Webull 영감을 받은 React 대시보드
-└── supabase/       # 데이터베이스 스키마와 Edge Function
+│   └── data/       # 분석 기록을 저장하는 NDJSON 아카이브
+└── frontend/       # Webull 영감을 받은 React 대시보드
 ```
 
 각 서브 프로젝트에는 세부 설정을 설명하는 README가 포함되어 있습니다.
+
+## 로컬 분석 아카이브
+
+기존 Supabase 함수 대신, 오케스트레이터는 모든 지표와 체결 이벤트를 `backend/data/analytics-history.ndjson` 파일에 직렬화합니다. 파일은
+자동으로 생성·갱신되며, `tail -f zenith/backend/data/analytics-history.ndjson` 명령으로 실시간 변화를 관찰할 수 있습니다. 동일한 데이터는
+`GET /metrics/archive?limit=500` 엔드포인트를 통해서도 JSON 형태로 내려받을 수 있으므로, 외부 BI 도구나 추가 백테스트 파이프라인에서 손쉽게
+소비할 수 있습니다.
 
 ## 패키징
 

@@ -10,12 +10,23 @@ import { createSignalsRouter } from './routes/signals.js';
 import { createChartsRouter } from './routes/charts.js';
 import { TradingEngine } from './services/tradingEngine.js';
 import { BinanceClient } from './clients/binanceClient.js';
+import { analyticsStore } from './store/analyticsStore.js';
+import { loadAnalyticsArchive } from './store/analyticsPersistence.js';
 import { logger } from './utils/logger.js';
 
 export function startOrchestrator(port = config.port) {
   const engine = new TradingEngine(config.binance.symbols);
   const binance = new BinanceClient();
   const app = createApp();
+
+  void loadAnalyticsArchive().then((events) => {
+    if (events.length > 0) {
+      analyticsStore.rehydrate(events);
+      logger.info({ events: events.length }, 'Rehydrated analytics archive');
+    }
+  }).catch((error) => {
+    logger.warn({ error }, 'Failed to load analytics archive');
+  });
 
   app.use('/control', createControlRouter(engine));
   app.use('/run', createRunRouter(engine));

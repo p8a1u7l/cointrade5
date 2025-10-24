@@ -1,5 +1,6 @@
 import { Router } from '../http/router.js';
 import { analyticsStore } from '../store/analyticsStore.js';
+import { loadAnalyticsArchive, analyticsArchivePath } from '../store/analyticsPersistence.js';
 import { fetchEquitySnapshot } from '../services/equitySnapshot.js';
 import { logger } from '../utils/logger.js';
 
@@ -62,6 +63,21 @@ export function createMetricsRouter(engine, binance) {
       return;
     }
     res.json({ points });
+  });
+
+  router.get('/archive', async (req, res) => {
+    const requestedLimit = Number(req.query.limit ?? '1000');
+    const safeLimit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.floor(requestedLimit) : 1000;
+    try {
+      const events = await loadAnalyticsArchive(safeLimit);
+      res.json({
+        events,
+        source: analyticsArchivePath,
+      });
+    } catch (error) {
+      logger.error({ error }, 'Failed to load analytics archive');
+      res.status(500).json({ error: 'Failed to load analytics archive' });
+    }
   });
 
   return router;
