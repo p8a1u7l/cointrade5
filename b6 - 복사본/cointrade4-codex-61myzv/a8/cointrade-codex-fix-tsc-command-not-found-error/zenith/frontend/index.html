@@ -39,7 +39,7 @@
       </header>
 
       <main class="layout">
-        <section class="panel trade-form">
+        <section class="panel trade-form" data-area="controls">
           <h2>포지션 설정</h2>
           <form id="trade-form">
             <div class="field">
@@ -135,9 +135,9 @@
           </form>
         </section>
 
-        <section class="panel chart-panel">
+        <section class="panel chart-panel" data-area="chart">
           <div class="panel-heading">
-            <h2>시장 흐름 (캔들 차트)</h2>
+            <h2>현재 자산 캔들 차트</h2>
             <div class="chart-controls">
               <select id="chart-symbol">
                 <option value="BTCUSDT">BTC / USDT</option>
@@ -156,7 +156,7 @@
           <div id="chart"></div>
         </section>
 
-        <section class="panel positions-panel">
+        <section class="panel positions-panel" data-area="history">
           <div class="panel-heading">
             <h2>최근 거래 내역</h2>
             <button id="clear-trades" class="ghost" type="button">기록 초기화</button>
@@ -176,6 +176,28 @@
               <tbody id="trade-history">
                 <tr class="placeholder">
                   <td colspan="6">아직 실행된 거래가 없습니다.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel performance-panel" data-area="performance">
+          <div class="panel-heading">
+            <h2>심볼별 실현 손익</h2>
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>심볼</th>
+                  <th class="numeric">거래 수</th>
+                  <th class="numeric">누적 손익</th>
+                </tr>
+              </thead>
+              <tbody id="performance-body">
+                <tr class="placeholder">
+                  <td colspan="3">거래가 기록되면 손익 요약이 표시됩니다.</td>
                 </tr>
               </tbody>
             </table>

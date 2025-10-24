@@ -8,14 +8,28 @@ const clearButton = document.getElementById('clear-trades');
 const directionInputs = document.querySelectorAll("input[name='direction']");
 const chartSymbol = document.getElementById('chart-symbol');
 const chartInterval = document.getElementById('chart-interval');
+const performanceBody = document.getElementById('performance-body');
 
 const trades = [];
+const performanceBySymbol = new Map();
 
 const formatTime = (date) => {
   return `${date.getHours().toString().padStart(2, '0')}:${date
     .getMinutes()
     .toString()
     .padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`;
+};
+
+const formatCurrency = (value) => {
+  if (value === 0) {
+    return '$0.00';
+  }
+  const sign = value > 0 ? '+' : '-';
+  const abs = Math.abs(value);
+  return `${sign}$${abs.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 };
 
 const updateLeverageOutput = () => {
@@ -30,6 +44,15 @@ leverageSlider.addEventListener('input', updateLeverageOutput);
 allocationSlider.addEventListener('input', updateAllocationOutput);
 updateLeverageOutput();
 updateAllocationOutput();
+
+const calculateEstimatedPnl = (trade) => {
+  const notional = Number(trade.quantity) * Number(trade.leverage);
+  const riskFactor = Number(trade.allocation) / 100;
+  const directional = trade.direction === 'long' ? 1 : -1;
+  const baseline = notional * riskFactor * 0.8;
+  const value = Number((baseline * directional).toFixed(2));
+  return Number.isNaN(value) ? 0 : value;
+};
 
 const renderTrades = () => {
   tradeHistory.innerHTML = '';
@@ -81,6 +104,56 @@ const renderTrades = () => {
   });
 };
 
+const renderPerformance = () => {
+  performanceBody.innerHTML = '';
+  if (!performanceBySymbol.size) {
+    const row = document.createElement('tr');
+    row.classList.add('placeholder');
+    const cell = document.createElement('td');
+    cell.colSpan = 3;
+    cell.textContent = '거래가 기록되면 손익 요약이 표시됩니다.';
+    row.appendChild(cell);
+    performanceBody.appendChild(row);
+    return;
+  }
+
+  const entries = Array.from(performanceBySymbol.entries()).sort(
+    (a, b) => b[1].pnl - a[1].pnl,
+  );
+
+  entries.forEach(([symbol, data]) => {
+    const row = document.createElement('tr');
+    const symbolCell = document.createElement('td');
+    symbolCell.textContent = symbol;
+
+    const countCell = document.createElement('td');
+    countCell.classList.add('numeric');
+    countCell.textContent = data.count.toString();
+
+    const pnlCell = document.createElement('td');
+    pnlCell.classList.add('numeric', 'pnl-value');
+    if (data.pnl > 0) {
+      pnlCell.classList.add('positive');
+    } else if (data.pnl < 0) {
+      pnlCell.classList.add('negative');
+    }
+    pnlCell.textContent = formatCurrency(data.pnl);
+
+    row.appendChild(symbolCell);
+    row.appendChild(countCell);
+    row.appendChild(pnlCell);
+    performanceBody.appendChild(row);
+  });
+};
+
+const updatePerformance = (trade) => {
+  const current = performanceBySymbol.get(trade.symbol) || { count: 0, pnl: 0 };
+  current.count += 1;
+  current.pnl = Number((current.pnl + trade.pnl).toFixed(2));
+  performanceBySymbol.set(trade.symbol, current);
+  renderPerformance();
+};
+
 tradeForm.addEventListener('submit', (event) => {
   event.preventDefault();
 
@@ -89,10 +162,10 @@ tradeForm.addEventListener('submit', (event) => {
   const direction = formData.get('direction');
   const leverage = Number(formData.get('leverage')) || Number(leverageSlider.value);
   const allocation = Number(formData.get('allocation')) || Number(allocationSlider.value);
-  const quantity = Number(formData.get('quantity'));
+  const quantity = Number(formData.get('quantity')) || 0;
   const notes = formData.get('notes');
 
-  trades.unshift({
+  const trade = {
     time: formatTime(new Date()),
     symbol,
     direction,
@@ -100,7 +173,11 @@ tradeForm.addEventListener('submit', (event) => {
     allocation,
     quantity,
     notes,
-  });
+  };
+
+  trade.pnl = calculateEstimatedPnl(trade);
+
+  trades.unshift(trade);
 
   if (trades.length > 12) {
     trades.length = 12;
@@ -118,11 +195,14 @@ tradeForm.addEventListener('submit', (event) => {
   });
 
   renderTrades();
+  updatePerformance(trade);
 });
 
 clearButton.addEventListener('click', () => {
   trades.length = 0;
+  performanceBySymbol.clear();
   renderTrades();
+  renderPerformance();
 });
 
 const generateCandle = (index, basePrice) => {
@@ -194,14 +274,27 @@ const setChartData = () => {
 
 const resizeChart = () => {
   const { width, height } = chartElement.getBoundingClientRect();
+  if (width === 0 || height === 0) {
+    return;
+  }
   chart.resize(width, height);
 };
 
-window.addEventListener('resize', resizeChart);
+window.addEventListener('resize', () => {
+  window.requestAnimationFrame(resizeChart);
+});
+
 resizeChart();
 
-chartSymbol.addEventListener('change', setChartData);
-chartInterval.addEventListener('change', setChartData);
+chartSymbol.addEventListener('change', () => {
+  setChartData();
+  resizeChart();
+});
+chartInterval.addEventListener('change', () => {
+  setChartData();
+  resizeChart();
+});
 
 setChartData();
 renderTrades();
+renderPerformance();

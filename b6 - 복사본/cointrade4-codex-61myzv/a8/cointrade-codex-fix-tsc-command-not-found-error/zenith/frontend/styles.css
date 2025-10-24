@@ -28,7 +28,7 @@ body {
 }
 
 .app-shell {
-  max-width: 1280px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 32px 24px 48px;
   display: flex;
@@ -115,8 +115,30 @@ body {
 
 .layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: minmax(260px, 320px) minmax(460px, 1fr) minmax(260px, 320px);
+  grid-template-areas:
+    'controls chart history'
+    'performance performance performance';
   gap: 24px;
+  align-items: stretch;
+}
+
+.trade-form {
+  grid-area: controls;
+}
+
+.chart-panel {
+  grid-area: chart;
+  display: flex;
+  flex-direction: column;
+}
+
+.positions-panel {
+  grid-area: history;
+}
+
+.performance-panel {
+  grid-area: performance;
 }
 
 .panel {
@@ -270,7 +292,8 @@ input[type='range'] {
 }
 
 .chart-panel #chart {
-  height: 340px;
+  flex: 1 1 auto;
+  min-height: 420px;
   margin-top: 18px;
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -298,7 +321,8 @@ input[type='range'] {
   font-weight: 500;
 }
 
-.positions-panel table {
+.positions-panel table,
+.performance-panel table {
   width: 100%;
   border-collapse: collapse;
   font-size: 14px;
@@ -312,7 +336,8 @@ input[type='range'] {
   overflow: hidden;
 }
 
-.positions-panel thead th {
+.positions-panel thead th,
+.performance-panel thead th {
   text-align: left;
   padding: 14px 16px;
   background: rgba(255, 255, 255, 0.04);
@@ -322,18 +347,32 @@ input[type='range'] {
   font-size: 12px;
 }
 
-.positions-panel tbody td {
+.positions-panel tbody td,
+.performance-panel tbody td {
   padding: 14px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
   text-align: left;
 }
 
-.positions-panel tbody tr:hover {
+.positions-panel tbody tr:hover,
+.performance-panel tbody tr:hover {
   background: rgba(108, 92, 231, 0.12);
 }
 
 .numeric {
   text-align: right !important;
+}
+
+.pnl-value {
+  font-weight: 600;
+}
+
+.pnl-value.positive {
+  color: var(--positive);
+}
+
+.pnl-value.negative {
+  color: var(--negative);
 }
 
 .direction-cell.long {
@@ -367,6 +406,21 @@ input[type='range'] {
   padding: 32px 16px;
 }
 
+@media (max-width: 1180px) {
+  .layout {
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    grid-template-areas:
+      'controls controls'
+      'chart chart'
+      'history history'
+      'performance performance';
+  }
+
+  .chart-panel #chart {
+    min-height: 360px;
+  }
+}
+
 @media (max-width: 768px) {
   .app-shell {
     padding: 24px 18px 36px;
@@ -382,7 +436,12 @@ input[type='range'] {
     justify-content: space-between;
   }
 
+  .chart-controls {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
   .chart-panel #chart {
-    height: 300px;
+    min-height: 300px;
   }
 }
