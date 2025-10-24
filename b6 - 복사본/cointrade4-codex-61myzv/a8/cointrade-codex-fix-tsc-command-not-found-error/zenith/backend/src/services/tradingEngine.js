@@ -166,24 +166,36 @@ export class TradingEngine extends TypedEventEmitter {
       return { symbols: this.getActiveSymbols(), movers: [] };
     }
 
-    if (this.baseSymbols.length > 0) {
-      try {
-        const filteredBase = await this.binance.filterTradableSymbols(this.baseSymbols);
-        const removed = this.baseSymbols.filter((symbol) => !filteredBase.includes(symbol));
-        if (removed.length > 0) {
-          logger.warn({ removed }, 'Removing non-tradable symbols from base universe');
-        }
-        this.baseSymbols = filteredBase;
-      } catch (error) {
-        logger.error({ error }, 'Failed to validate base Binance symbols');
-      }
-    }
-
     const now = Date.now();
     const intervalMs = Math.max(30_000, Number(discovery.refreshIntervalSeconds ?? 180) * 1000);
     const force = options.force === true;
     if (!force && now - this.lastSymbolRefresh < intervalMs) {
       return { symbols: this.getActiveSymbols(), movers: this.getTopMovers() };
+    }
+
+    const desiredQuotes = Array.isArray(discovery.quoteAssets) ? discovery.quoteAssets : [];
+    const quoteAssetSet = new Set(
+      desiredQuotes
+        .map((asset) => (typeof asset === 'string' ? asset.trim().toUpperCase() : ''))
+        .filter((asset) => asset.length > 0)
+    );
+    if (quoteAssetSet.size === 0) {
+      quoteAssetSet.add('USDT');
+    }
+
+    try {
+      const filteredBase = await this.binance.filterTradableSymbols(this.baseSymbols, { quoteAssetSet });
+      if (filteredBase.length !== this.baseSymbols.length) {
+        const removed = this.baseSymbols.filter((symbol) => !filteredBase.includes(symbol));
+        const level = filteredBase.length === 0 ? 'warn' : 'info';
+        logger[level](
+          { removed, remaining: filteredBase },
+          'Filtered non-tradable base symbols from Binance universe'
+        );
+      }
+      this.baseSymbols = filteredBase;
+    } catch (error) {
+      logger.error({ error }, 'Unable to validate base symbols against Binance metadata');
     }
 
     const configuredMax = Math.max(Number(discovery.maxActiveSymbols ?? 0), this.baseSymbols.length);
@@ -198,13 +210,16 @@ export class TradingEngine extends TypedEventEmitter {
       const movers = await this.binance.fetchTopMovers({
         limit: fetchLimit,
         minQuoteVolume: discovery.minQuoteVolume,
-        quoteAssets: discovery.quoteAssets,
+        quoteAssets: Array.from(quoteAssetSet),
       });
-      this.cachedTopMovers = movers;
+      const filteredMovers = this.binance.exchangeInfo?.map?.size
+        ? movers.filter((item) => this.binance.isSymbolTradableCached(item.symbol, { quoteAssetSet }))
+        : movers;
+      this.cachedTopMovers = filteredMovers;
       this.lastSymbolRefresh = now;
 
       const baseSet = new Set(this.baseSymbols);
-      const dynamicCandidates = movers
+      const dynamicCandidates = filteredMovers
         .map((item) => item.symbol)
         .filter((symbol) => !baseSet.has(symbol));
       const limitedDynamics = dynamicBudget > 0
@@ -225,7 +240,7 @@ export class TradingEngine extends TypedEventEmitter {
         );
       }
 
-      return { symbols: this.getActiveSymbols(), movers };
+      return { symbols: this.getActiveSymbols(), movers: filteredMovers };
     } catch (error) {
       logger.error({ error }, 'Failed to refresh symbol universe');
       if (force && this.activeSymbols.length === 0 && this.baseSymbols.length > 0) {

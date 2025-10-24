@@ -3,13 +3,108 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { TypedEventEmitter } from '../utils/eventEmitter.js';
 
-const EXCHANGE_INFO_TTL_MS = 5 * 60 * 1000;
-
-const normalizeSymbol = (value) => (typeof value === 'string' ? value.trim().toUpperCase() : '');
-
 const REST_BASE_URL = config.binance.useTestnet
   ? 'https://testnet.binancefuture.com'
   : 'https://fapi.binance.com';
+const EXCHANGE_INFO_TTL_MS = 5 * 60 * 1000;
+
+const toFiniteNumber = (value, fallback = 0) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const positiveOrInfinity = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return numeric;
+};
+
+const parsePrecision = (raw) => {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const [, fractional] = raw.split('.');
+  if (!fractional) {
+    return 0;
+  }
+  const trimmed = fractional.replace(/0+$/, '');
+  return trimmed.length;
+};
+
+const buildFiltersFromExchangeInfo = (info) => {
+  if (!info) {
+    return {
+      stepSize: 0,
+      minQty: 0,
+      maxQty: Number.POSITIVE_INFINITY,
+      minNotional: 0,
+      maxNotional: Number.POSITIVE_INFINITY,
+      quantityPrecision: undefined,
+      stepSizePrecision: undefined,
+    };
+  }
+
+  const filters = Array.isArray(info.filters) ? info.filters : [];
+  const findFilter = (type) => filters.find((filter) => filter?.filterType === type) ?? null;
+
+  const lotFilter = findFilter('LOT_SIZE');
+  const marketLotFilter = findFilter('MARKET_LOT_SIZE');
+  const effectiveLotFilter = marketLotFilter ?? lotFilter ?? null;
+  const notionalFilter = findFilter('NOTIONAL') ?? findFilter('MIN_NOTIONAL') ?? null;
+
+  const stepSize = toFiniteNumber(effectiveLotFilter?.stepSize ?? lotFilter?.stepSize, 0);
+  const minQty = Math.max(
+    toFiniteNumber(marketLotFilter?.minQty, 0),
+    toFiniteNumber(lotFilter?.minQty, 0),
+    0,
+  );
+  const maxQty = Math.min(
+    positiveOrInfinity(marketLotFilter?.maxQty),
+    positiveOrInfinity(lotFilter?.maxQty),
+  );
+
+  const quantityPrecision = Number.isFinite(Number(info.quantityPrecision))
+    ? Math.max(0, Math.floor(Number(info.quantityPrecision)))
+    : undefined;
+  const stepSizePrecision = parsePrecision(effectiveLotFilter?.stepSize ?? lotFilter?.stepSize);
+
+  return {
+    stepSize,
+    minQty,
+    maxQty: Number.isFinite(maxQty) ? maxQty : Number.POSITIVE_INFINITY,
+    minNotional: toFiniteNumber(notionalFilter?.minNotional ?? notionalFilter?.notional, 0),
+    maxNotional: positiveOrInfinity(notionalFilter?.maxNotional),
+    quantityPrecision,
+    stepSizePrecision,
+  };
+};
+
+const normalizeQuoteAssetFilter = (quoteAssets) => {
+  if (!quoteAssets) {
+    return null;
+  }
+
+  const source = quoteAssets instanceof Set
+    ? [...quoteAssets]
+    : Array.isArray(quoteAssets)
+      ? quoteAssets
+      : [quoteAssets];
+
+  const normalized = new Set();
+  for (const entry of source) {
+    if (entry === undefined || entry === null) {
+      continue;
+    }
+    const value = String(entry).trim().toUpperCase();
+    if (value.length > 0) {
+      normalized.add(value);
+    }
+  }
+
+  return normalized.size > 0 ? normalized : null;
+};
 
 export class BinanceRealtimeFeed extends TypedEventEmitter {
   constructor() {
@@ -106,7 +201,7 @@ export class BinanceClient {
   constructor() {
     this.baseUrl = REST_BASE_URL;
     this.symbolFilters = new Map();
-    this.exchangeInfoCache = { timestamp: 0, map: new Map(), promise: null };
+    this.exchangeInfo = { timestamp: 0, ttl: EXCHANGE_INFO_TTL_MS, map: new Map() };
   }
 
   async fetchKlines(symbol, interval = '1m', limit = 120) {
@@ -348,90 +443,131 @@ export class BinanceClient {
     }
   }
 
-  async fetchSymbolFilters(symbol) {
-    const key = normalizeSymbol(symbol);
-    if (!key) {
-      throw new Error('Invalid symbol provided for Binance exchange info lookup');
-    }
-    if (this.symbolFilters.has(key)) {
-      return this.symbolFilters.get(key);
+  async ensureExchangeInfo(options = {}) {
+    const ttl = Number.isFinite(options.ttl) ? Number(options.ttl) : this.exchangeInfo.ttl ?? EXCHANGE_INFO_TTL_MS;
+    const now = Date.now();
+    if (!options.force && this.exchangeInfo.map.size > 0 && now - this.exchangeInfo.timestamp < ttl) {
+      return this.exchangeInfo.map;
     }
 
-    const exchangeInfo = await this._loadExchangeInfo();
-    const info = exchangeInfo.get(key);
-    if (!this._isSymbolTradable(info)) {
-      const reported = typeof info?.symbol === 'string' ? info.symbol.toUpperCase() : 'unknown';
-      throw new Error(`Exchange info for ${key} not available on Binance (received ${reported})`);
-    }
-
-    const findFilter = (type) =>
-      Array.isArray(info.filters) ? info.filters.find((filter) => filter?.filterType === type) : undefined;
-
-    const parsePrecision = (raw) => {
-      if (typeof raw !== 'string') {
-        return undefined;
+    try {
+      const response = await fetch(`${this.baseUrl}/fapi/v1/exchangeInfo`);
+      if (!response.ok) {
+        throw new Error(`Binance exchange info request failed: ${response.status}`);
       }
-      const [, fractional] = raw.split('.');
-      if (!fractional) {
-        return 0;
+      const payload = await response.json();
+      if (!Array.isArray(payload?.symbols)) {
+        throw new Error('Binance exchange info payload missing symbols');
       }
-      const trimmed = fractional.replace(/0+$/, '');
-      return trimmed.length;
-    };
 
-    const marketLotFilter = findFilter('MARKET_LOT_SIZE');
-    const lotFilter = findFilter('LOT_SIZE');
-    const effectiveLotFilter = marketLotFilter ?? lotFilter;
-    const notionalFilter = findFilter('NOTIONAL') ?? findFilter('MIN_NOTIONAL');
+      const map = new Map();
+      const filtersCache = new Map();
 
-    const toNumber = (value, fallback = 0) => {
-      const numeric = Number(value);
-      return Number.isFinite(numeric) ? numeric : fallback;
-    };
+      for (const entry of payload.symbols) {
+        const symbol = typeof entry?.symbol === 'string' ? entry.symbol.toUpperCase() : null;
+        if (!symbol) continue;
 
-    const marketMinQty = toNumber(marketLotFilter?.minQty, 0);
-    const lotMinQty = toNumber(lotFilter?.minQty, 0);
-    const marketMaxQty = toNumber(marketLotFilter?.maxQty, Number.POSITIVE_INFINITY);
-    const lotMaxQty = toNumber(lotFilter?.maxQty, Number.POSITIVE_INFINITY);
+        const filters = buildFiltersFromExchangeInfo(entry);
+        const quoteAsset = typeof entry?.quoteAsset === 'string' ? entry.quoteAsset.toUpperCase() : null;
+        const descriptor = {
+          symbol,
+          contractType: entry?.contractType ?? null,
+          status: entry?.status ?? null,
+          quoteAsset,
+          baseAsset: typeof entry?.baseAsset === 'string' ? entry.baseAsset.toUpperCase() : null,
+          marginAsset: typeof entry?.marginAsset === 'string' ? entry.marginAsset.toUpperCase() : null,
+          filters,
+          raw: entry,
+        };
+        descriptor.isPerpetual = descriptor.contractType === 'PERPETUAL';
+        descriptor.isLinear = descriptor.marginAsset === 'USDT';
+        descriptor.isTrading = descriptor.status === 'TRADING';
+        descriptor.isTradable = descriptor.isPerpetual && descriptor.isTrading;
+        map.set(symbol, descriptor);
+        filtersCache.set(symbol, filters);
+      }
 
-    const quantityPrecision = Number.isFinite(Number(info.quantityPrecision))
-      ? Math.max(0, Math.floor(Number(info.quantityPrecision)))
-      : undefined;
-    const stepSizePrecision = parsePrecision(effectiveLotFilter?.stepSize ?? lotFilter?.stepSize);
-
-    const filters = {
-      stepSize: toNumber(effectiveLotFilter?.stepSize ?? lotFilter?.stepSize, 0),
-      minQty: Math.max(marketMinQty, lotMinQty, 0),
-      maxQty: Math.min(
-        marketMaxQty > 0 ? marketMaxQty : Number.POSITIVE_INFINITY,
-        lotMaxQty > 0 ? lotMaxQty : Number.POSITIVE_INFINITY
-      ),
-      minNotional: toNumber(notionalFilter?.minNotional ?? notionalFilter?.notional, 0),
-      maxNotional: toNumber(notionalFilter?.maxNotional, Number.POSITIVE_INFINITY),
-      quantityPrecision,
-      stepSizePrecision,
-    };
-
-    this.symbolFilters.set(key, filters);
-    return filters;
+      this.exchangeInfo = { timestamp: now, ttl, map };
+      this.symbolFilters = filtersCache;
+      return map;
+    } catch (error) {
+      logger.error({ error }, 'Failed to refresh Binance exchange info');
+      throw error;
+    }
   }
 
-  async filterTradableSymbols(symbols) {
+  async getSymbolMeta(symbol) {
+    const key = typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+    if (!key) {
+      return null;
+    }
+    const map = await this.ensureExchangeInfo();
+    return map.get(key) ?? null;
+  }
+
+  async filterTradableSymbols(symbols, options = {}) {
     if (!Array.isArray(symbols) || symbols.length === 0) {
       return [];
     }
 
-    const exchangeInfo = await this._loadExchangeInfo();
+    const map = await this.ensureExchangeInfo();
+    const quoteAssetSet = options.quoteAssetSet ?? normalizeQuoteAssetFilter(options.quoteAssets);
     const result = [];
+    const seen = new Set();
     for (const entry of symbols) {
-      const key = normalizeSymbol(entry);
-      if (!key) continue;
-      const info = exchangeInfo.get(key);
-      if (this._isSymbolTradable(info)) {
-        result.push(key);
+      const key = typeof entry === 'string' ? entry.trim().toUpperCase() : '';
+      if (!key || seen.has(key)) {
+        continue;
       }
+      seen.add(key);
+      const meta = map.get(key);
+      if (!meta || !meta.isTradable) {
+        continue;
+      }
+      if (quoteAssetSet && quoteAssetSet.size > 0 && (!meta.quoteAsset || !quoteAssetSet.has(meta.quoteAsset))) {
+        continue;
+      }
+      result.push(meta.symbol);
     }
     return result;
+  }
+
+  isSymbolTradableCached(symbol, options = {}) {
+    const key = typeof symbol === 'string' ? symbol.toUpperCase() : '';
+    if (!key || !this.exchangeInfo?.map?.size) {
+      return false;
+    }
+    const meta = this.exchangeInfo.map.get(key);
+    if (!meta || !meta.isTradable) {
+      return false;
+    }
+    const quoteAssetSet = options.quoteAssetSet ?? normalizeQuoteAssetFilter(options.quoteAssets);
+    if (quoteAssetSet && quoteAssetSet.size > 0) {
+      return Boolean(meta.quoteAsset) && quoteAssetSet.has(meta.quoteAsset);
+    }
+    return true;
+  }
+
+  async fetchSymbolFilters(symbol) {
+    const key = typeof symbol === 'string' ? symbol.toUpperCase() : '';
+    if (!key) {
+      throw new Error('Symbol is required to fetch Binance filters');
+    }
+
+    if (this.symbolFilters.has(key)) {
+      return this.symbolFilters.get(key);
+    }
+
+    const meta = await this.getSymbolMeta(key);
+    if (!meta) {
+      throw new Error(`Symbol ${key} not listed on Binance futures exchange`);
+    }
+    if (!meta.isTradable) {
+      throw new Error(`Symbol ${key} is not tradable on Binance futures`);
+    }
+
+    this.symbolFilters.set(key, meta.filters);
+    return meta.filters;
   }
 
   static quantize(value, stepSize) {
@@ -624,9 +760,9 @@ export class BinanceClient {
     const minQuoteVolume = Number.isFinite(options.minQuoteVolume)
       ? Number(options.minQuoteVolume)
       : 0;
-    const quoteAssets = Array.isArray(options.quoteAssets) && options.quoteAssets.length > 0
-      ? options.quoteAssets.map((asset) => asset.toUpperCase())
-      : ['USDT'];
+    const quoteAssetSet = normalizeQuoteAssetFilter(options.quoteAssets) ?? null;
+
+    await this.ensureExchangeInfo();
 
     const response = await fetch(`${this.baseUrl}/fapi/v1/ticker/24hr`);
     if (!response.ok) {
@@ -638,15 +774,15 @@ export class BinanceClient {
     }
 
     const ranked = [];
-    const exchangeInfo = await this._loadExchangeInfo();
     for (const entry of data) {
       const symbol = typeof entry.symbol === 'string' ? entry.symbol.toUpperCase() : undefined;
       if (!symbol) continue;
-      const matchingQuote = quoteAssets.find((asset) => symbol.endsWith(asset));
-      if (!matchingQuote) continue;
+      if (!this.isSymbolTradableCached(symbol, { quoteAssetSet })) {
+        continue;
+      }
 
-      const info = exchangeInfo.get(symbol);
-      if (!this._isSymbolTradable(info)) continue;
+      const meta = this.exchangeInfo.map.get(symbol);
+      const quoteAsset = meta?.quoteAsset ?? undefined;
 
       const priceChangePercent = Number(entry.priceChangePercent ?? entry.priceChange_pct ?? entry.priceChange);
       const lastPrice = Number(entry.lastPrice ?? entry.prevClosePrice ?? entry.close ?? entry.price);
@@ -670,7 +806,7 @@ export class BinanceClient {
 
       ranked.push({
         symbol,
-        quoteAsset: matchingQuote,
+        quoteAsset,
         priceChangePercent,
         lastPrice,
         quoteVolume,
@@ -682,66 +818,5 @@ export class BinanceClient {
 
     ranked.sort((a, b) => b.score - a.score);
     return ranked.slice(0, limit);
-  }
-
-  async _loadExchangeInfo(force = false) {
-    const now = Date.now();
-    const cache = this.exchangeInfoCache ?? {};
-    if (!force) {
-      if (cache.promise) {
-        return cache.promise;
-      }
-      if (cache.map instanceof Map && cache.map.size > 0 && now - cache.timestamp < EXCHANGE_INFO_TTL_MS) {
-        return cache.map;
-      }
-    }
-
-    const loader = (async () => {
-      const response = await fetch(`${this.baseUrl}/fapi/v1/exchangeInfo`);
-      if (!response.ok) {
-        throw new Error(`Binance exchange info request failed: ${response.status}`);
-      }
-      const payload = await response.json();
-      if (!Array.isArray(payload?.symbols)) {
-        throw new Error('Binance exchange info payload missing symbols array');
-      }
-
-      const map = new Map();
-      for (const entry of payload.symbols) {
-        const key = normalizeSymbol(entry?.symbol);
-        if (!key) continue;
-        map.set(key, entry);
-      }
-
-      return map;
-    })();
-
-    const promise = loader
-      .then((map) => {
-        this.exchangeInfoCache = { timestamp: Date.now(), map, promise: null };
-        this.symbolFilters.clear();
-        return map;
-      })
-      .catch((error) => {
-        this.exchangeInfoCache = { ...cache, promise: null };
-        throw error;
-      });
-
-    this.exchangeInfoCache = { ...cache, promise };
-
-    return promise;
-  }
-
-  _isSymbolTradable(info) {
-    if (!info) {
-      return false;
-    }
-    if (typeof info.status === 'string' && info.status.toUpperCase() !== 'TRADING') {
-      return false;
-    }
-    if (typeof info.contractType === 'string' && info.contractType.toUpperCase() !== 'PERPETUAL') {
-      return false;
-    }
-    return true;
   }
 }
