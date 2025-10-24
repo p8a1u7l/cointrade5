@@ -92,46 +92,46 @@
               </div>
             </div>
 
-            <div class="field grouped">
-              <fieldset class="direction-toggle">
-                <legend>포지션 방향</legend>
-                <div class="direction-options" role="radiogroup">
-                  <input
-                    type="radio"
-                    id="direction-long"
-                    name="direction"
-                    value="long"
-                    checked
-                  />
-                  <label for="direction-long" class="pill">매수 (Long)</label>
-                  <input type="radio" id="direction-short" name="direction" value="short" />
-                  <label for="direction-short" class="pill">매도 (Short)</label>
+            <div class="field ai-preview">
+              <h3>AI 거래 판단</h3>
+              <p>
+                AI가 시장 상황을 분석하여 매수/매도 방향과 예상 진입 수량을 자동으로
+                결정합니다. 사용자는 레버리지와 투자 비중만 조정하면 됩니다.
+              </p>
+              <div class="ai-metrics">
+                <div class="metric">
+                  <span>예상 방향</span>
+                  <strong id="ai-direction">분석 대기</strong>
                 </div>
-              </fieldset>
-              <div class="quantity-field">
-                <label for="quantity">계약 수량</label>
-                <input
-                  id="quantity"
-                  name="quantity"
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value="0.5"
-                />
+                <div class="metric">
+                  <span>예상 진입가</span>
+                  <strong id="ai-price">-</strong>
+                </div>
+                <div class="metric">
+                  <span>예상 수량</span>
+                  <strong id="ai-quantity">-</strong>
+                </div>
+                <div class="metric">
+                  <span>신뢰도</span>
+                  <strong id="ai-confidence">-</strong>
+                </div>
+              </div>
+              <div class="ai-rationale" id="ai-rationale">
+                AI가 최신 데이터를 분석하고 있습니다.
               </div>
             </div>
 
             <div class="field">
-              <label for="notes">전략 메모</label>
+              <label for="notes">추가 메모</label>
               <textarea
                 id="notes"
                 name="notes"
                 rows="3"
-                placeholder="진입 이유를 기록하세요"
+                placeholder="AI 판단에 대한 개인 메모를 남겨보세요"
               ></textarea>
             </div>
 
-            <button type="submit" class="primary">포지션 실행</button>
+            <button type="submit" class="primary">AI에게 거래 실행 요청</button>
           </form>
         </section>
 

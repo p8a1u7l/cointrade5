@@ -2,16 +2,23 @@ const leverageSlider = document.getElementById('leverage-slider');
 const leverageOutput = document.getElementById('leverage-output');
 const allocationSlider = document.getElementById('allocation-slider');
 const allocationOutput = document.getElementById('allocation-output');
+const symbolInput = document.getElementById('symbol');
 const tradeForm = document.getElementById('trade-form');
 const tradeHistory = document.getElementById('trade-history');
 const clearButton = document.getElementById('clear-trades');
-const directionInputs = document.querySelectorAll("input[name='direction']");
 const chartSymbol = document.getElementById('chart-symbol');
 const chartInterval = document.getElementById('chart-interval');
 const performanceBody = document.getElementById('performance-body');
+const aiDirectionLabel = document.getElementById('ai-direction');
+const aiQuantityLabel = document.getElementById('ai-quantity');
+const aiPriceLabel = document.getElementById('ai-price');
+const aiConfidenceLabel = document.getElementById('ai-confidence');
+const aiRationale = document.getElementById('ai-rationale');
 
 const trades = [];
 const performanceBySymbol = new Map();
+const portfolioEquity = 25640.2;
+let latestProjection = null;
 
 const formatTime = (date) => {
   return `${date.getHours().toString().padStart(2, '0')}:${date
@@ -32,6 +39,97 @@ const formatCurrency = (value) => {
   })}`;
 };
 
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const getBaselinePrice = (symbol) => {
+  const upper = symbol.toUpperCase();
+  if (upper.startsWith('ETH')) return 1860;
+  if (upper.startsWith('SOL')) return 32;
+  if (upper.startsWith('XRP')) return 0.52;
+  if (upper.startsWith('BNB')) return 242;
+  if (upper.startsWith('DOGE')) return 0.078;
+  return 28600;
+};
+
+const formatPrice = (price) => {
+  if (!Number.isFinite(price)) {
+    return '-';
+  }
+  return `$${price.toLocaleString(undefined, {
+    minimumFractionDigits: price < 2 ? 4 : 2,
+    maximumFractionDigits: price < 2 ? 4 : 2,
+  })}`;
+};
+
+const formatConfidence = (value) => `${Math.round(value * 100)}%`;
+
+const buildAiNarrative = (projection) => {
+  const bias = projection.direction === 'long' ? '상승 모멘텀 포착' : '하락 압력 감지';
+  const confidenceText = `신뢰도 ${formatConfidence(projection.confidence)}`;
+  const leverageText = `레버리지 x${projection.leverage}`;
+  const allocationText = `포트폴리오 대비 ${projection.allocation}% 비중`;
+  return `${bias} · ${confidenceText} · ${leverageText}, ${allocationText}`;
+};
+
+const updateAiPanel = (projection) => {
+  if (!projection) {
+    aiDirectionLabel.textContent = '분석 대기';
+    aiDirectionLabel.classList.remove('positive', 'negative');
+    aiQuantityLabel.textContent = '-';
+    aiPriceLabel.textContent = '-';
+    aiConfidenceLabel.textContent = '-';
+    aiRationale.textContent = 'AI가 최신 데이터를 분석하고 있습니다.';
+    return;
+  }
+
+  aiDirectionLabel.textContent = projection.direction === 'long' ? '매수' : '매도';
+  aiDirectionLabel.classList.toggle('positive', projection.direction === 'long');
+  aiDirectionLabel.classList.toggle('negative', projection.direction !== 'long');
+  aiQuantityLabel.textContent = projection.quantity.toLocaleString(undefined, {
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 3,
+  });
+  aiPriceLabel.textContent = formatPrice(projection.price);
+  aiConfidenceLabel.textContent = formatConfidence(projection.confidence);
+  aiRationale.textContent = projection.rationale;
+};
+
+const evaluateAiProjection = () => {
+  const symbol = (symbolInput.value || 'BTCUSDT').toUpperCase();
+  const leverage = Number(leverageSlider.value);
+  const allocation = Number(allocationSlider.value);
+  const baseline = getBaselinePrice(symbol);
+  const intervalIndex = chartInterval.selectedIndex >= 0 ? chartInterval.selectedIndex : 1;
+  const volatility = 1 + intervalIndex * 0.08;
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  const seed = symbol.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const oscillator = Math.sin((minuteBucket + seed) * 1.37);
+  const direction = oscillator >= 0 ? 'long' : 'short';
+  const confidence = clamp(Math.abs(oscillator) + 0.35, 0.45, 0.95);
+  const price = Number((baseline * volatility).toFixed(baseline < 2 ? 4 : 2));
+  const notionalBudget = (portfolioEquity * allocation) / 100;
+  const rawQuantity = (notionalBudget * leverage) / price;
+  const quantity = Math.max(Number(rawQuantity.toFixed(3)), 0.001);
+
+  const projection = {
+    symbol,
+    leverage,
+    allocation,
+    direction,
+    confidence,
+    price,
+    quantity,
+  };
+
+  projection.notional = Number((quantity * price).toFixed(2));
+  projection.rationale = buildAiNarrative(projection);
+
+  latestProjection = projection;
+  updateAiPanel(projection);
+
+  return projection;
+};
+
 const updateLeverageOutput = () => {
   leverageOutput.textContent = `x${leverageSlider.value}`;
 };
@@ -40,17 +138,26 @@ const updateAllocationOutput = () => {
   allocationOutput.textContent = `${allocationSlider.value}%`;
 };
 
-leverageSlider.addEventListener('input', updateLeverageOutput);
-allocationSlider.addEventListener('input', updateAllocationOutput);
+const handleLeverageInput = () => {
+  updateLeverageOutput();
+  evaluateAiProjection();
+};
+
+const handleAllocationInput = () => {
+  updateAllocationOutput();
+  evaluateAiProjection();
+};
+
+leverageSlider.addEventListener('input', handleLeverageInput);
+allocationSlider.addEventListener('input', handleAllocationInput);
 updateLeverageOutput();
 updateAllocationOutput();
 
 const calculateEstimatedPnl = (trade) => {
-  const notional = Number(trade.quantity) * Number(trade.leverage);
-  const riskFactor = Number(trade.allocation) / 100;
   const directional = trade.direction === 'long' ? 1 : -1;
-  const baseline = notional * riskFactor * 0.8;
-  const value = Number((baseline * directional).toFixed(2));
+  const volatilityEdge = 0.006 + trade.confidence * 0.014;
+  const estimated = trade.notional * trade.leverage * volatilityEdge * directional;
+  const value = Number(estimated.toFixed(2));
   return Number.isNaN(value) ? 0 : value;
 };
 
@@ -158,22 +265,33 @@ tradeForm.addEventListener('submit', (event) => {
   event.preventDefault();
 
   const formData = new FormData(tradeForm);
-  const symbol = formData.get('symbol').toUpperCase();
-  const direction = formData.get('direction');
-  const leverage = Number(formData.get('leverage')) || Number(leverageSlider.value);
-  const allocation = Number(formData.get('allocation')) || Number(allocationSlider.value);
-  const quantity = Number(formData.get('quantity')) || 0;
-  const notes = formData.get('notes');
+  const symbol = (formData.get('symbol') || symbolInput.value || 'BTCUSDT').toUpperCase();
+  const leverage = Number(formData.get('leverage') || leverageSlider.value);
+  const allocation = Number(formData.get('allocation') || allocationSlider.value);
+  const userNotes = formData.get('notes');
+
+  symbolInput.value = symbol;
+  leverageSlider.value = leverage;
+  allocationSlider.value = allocation;
+
+  const projection = evaluateAiProjection();
 
   const trade = {
     time: formatTime(new Date()),
-    symbol,
-    direction,
-    leverage,
-    allocation,
-    quantity,
-    notes,
+    symbol: projection.symbol,
+    direction: projection.direction,
+    leverage: projection.leverage,
+    allocation: projection.allocation,
+    quantity: projection.quantity,
+    entryPrice: projection.price,
+    confidence: projection.confidence,
+    notional: projection.notional,
+    notes: projection.rationale,
   };
+
+  if (userNotes) {
+    trade.notes = `${userNotes}\n${projection.rationale}`;
+  }
 
   trade.pnl = calculateEstimatedPnl(trade);
 
@@ -184,15 +302,12 @@ tradeForm.addEventListener('submit', (event) => {
   }
 
   tradeForm.reset();
-  leverageSlider.value = leverage;
-  allocationSlider.value = allocation;
+  symbolInput.value = projection.symbol;
+  leverageSlider.value = projection.leverage;
+  allocationSlider.value = projection.allocation;
   updateLeverageOutput();
   updateAllocationOutput();
-  directionInputs.forEach((input) => {
-    if (input.value === direction) {
-      input.checked = true;
-    }
-  });
+  evaluateAiProjection();
 
   renderTrades();
   updatePerformance(trade);
@@ -203,6 +318,7 @@ clearButton.addEventListener('click', () => {
   performanceBySymbol.clear();
   renderTrades();
   renderPerformance();
+  evaluateAiProjection();
 });
 
 const generateCandle = (index, basePrice) => {
@@ -260,14 +376,10 @@ const candleSeries = chart.addCandlestickSeries({
 });
 
 const setChartData = () => {
-  const base = chartSymbol.value.startsWith('ETH')
-    ? 1860
-    : chartSymbol.value.startsWith('SOL')
-    ? 32
-    : chartSymbol.value.startsWith('XRP')
-    ? 0.52
-    : 28600;
-  const data = generateSeriesData(base * (chartInterval.selectedIndex + 0.9));
+  const selectedSymbol = chartSymbol.value || 'BTCUSDT';
+  const base = getBaselinePrice(selectedSymbol);
+  const intervalFactor = chartInterval.selectedIndex + 0.9;
+  const data = generateSeriesData(base * intervalFactor);
   candleSeries.setData(data);
   chart.timeScale().fitContent();
 };
@@ -287,14 +399,36 @@ window.addEventListener('resize', () => {
 resizeChart();
 
 chartSymbol.addEventListener('change', () => {
+  symbolInput.value = chartSymbol.value;
   setChartData();
   resizeChart();
+  evaluateAiProjection();
 });
+
 chartInterval.addEventListener('change', () => {
   setChartData();
   resizeChart();
+  evaluateAiProjection();
 });
 
+symbolInput.addEventListener('input', () => {
+  evaluateAiProjection();
+});
+
+symbolInput.addEventListener('blur', () => {
+  symbolInput.value = (symbolInput.value || '').toUpperCase();
+  const match = Array.from(chartSymbol.options).find(
+    (option) => option.value === symbolInput.value,
+  );
+  if (match) {
+    chartSymbol.value = match.value;
+    setChartData();
+    resizeChart();
+  }
+  evaluateAiProjection();
+});
+
+evaluateAiProjection();
 setChartData();
 renderTrades();
 renderPerformance();
