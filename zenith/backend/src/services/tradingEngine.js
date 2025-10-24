@@ -173,31 +173,6 @@ export class TradingEngine extends TypedEventEmitter {
       return { symbols: this.getActiveSymbols(), movers: this.getTopMovers() };
     }
 
-    const desiredQuotes = Array.isArray(discovery.quoteAssets) ? discovery.quoteAssets : [];
-    const quoteAssetSet = new Set(
-      desiredQuotes
-        .map((asset) => (typeof asset === 'string' ? asset.trim().toUpperCase() : ''))
-        .filter((asset) => asset.length > 0)
-    );
-    if (quoteAssetSet.size === 0) {
-      quoteAssetSet.add('USDT');
-    }
-
-    try {
-      const filteredBase = await this.binance.filterTradableSymbols(this.baseSymbols, { quoteAssetSet });
-      if (filteredBase.length !== this.baseSymbols.length) {
-        const removed = this.baseSymbols.filter((symbol) => !filteredBase.includes(symbol));
-        const level = filteredBase.length === 0 ? 'warn' : 'info';
-        logger[level](
-          { removed, remaining: filteredBase },
-          'Filtered non-tradable base symbols from Binance universe'
-        );
-      }
-      this.baseSymbols = filteredBase;
-    } catch (error) {
-      logger.error({ error }, 'Unable to validate base symbols against Binance metadata');
-    }
-
     const configuredMax = Math.max(Number(discovery.maxActiveSymbols ?? 0), this.baseSymbols.length);
     const dynamicBudget = Math.max(configuredMax - this.baseSymbols.length, 0);
     const fetchLimit = Math.max(
@@ -210,16 +185,13 @@ export class TradingEngine extends TypedEventEmitter {
       const movers = await this.binance.fetchTopMovers({
         limit: fetchLimit,
         minQuoteVolume: discovery.minQuoteVolume,
-        quoteAssets: Array.from(quoteAssetSet),
+        quoteAssets: discovery.quoteAssets,
       });
-      const filteredMovers = this.binance.exchangeInfo?.map?.size
-        ? movers.filter((item) => this.binance.isSymbolTradableCached(item.symbol, { quoteAssetSet }))
-        : movers;
-      this.cachedTopMovers = filteredMovers;
+      this.cachedTopMovers = movers;
       this.lastSymbolRefresh = now;
 
       const baseSet = new Set(this.baseSymbols);
-      const dynamicCandidates = filteredMovers
+      const dynamicCandidates = movers
         .map((item) => item.symbol)
         .filter((symbol) => !baseSet.has(symbol));
       const limitedDynamics = dynamicBudget > 0
@@ -240,7 +212,7 @@ export class TradingEngine extends TypedEventEmitter {
         );
       }
 
-      return { symbols: this.getActiveSymbols(), movers: filteredMovers };
+      return { symbols: this.getActiveSymbols(), movers };
     } catch (error) {
       logger.error({ error }, 'Failed to refresh symbol universe');
       if (force && this.activeSymbols.length === 0 && this.baseSymbols.length > 0) {
