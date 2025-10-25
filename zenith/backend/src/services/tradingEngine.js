@@ -18,6 +18,28 @@ const MIN_LOCAL_EDGE = 0.4;
 const MIN_LOCAL_CONFIDENCE = 0.55;
 const POSITION_EPSILON = 1e-8;
 const VALID_SYMBOL_REGEX = /^[A-Z0-9]+$/;
+const PERCENT_PRICE_ERROR_REGEX = /percent_price/i;
+const MAX_POSITION_ERROR_REGEX = /maximum allowable position/i;
+
+const getErrorMessage = (error) => {
+  if (!error) {
+    return '';
+  }
+  if (error instanceof Error) {
+    return error.message ?? '';
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch (_err) {
+    return '';
+  }
+};
+
+const isPercentPriceError = (error) => PERCENT_PRICE_ERROR_REGEX.test(getErrorMessage(error));
+const isMaxPositionError = (error) => MAX_POSITION_ERROR_REGEX.test(getErrorMessage(error));
 
 const toNumber = (value) => {
   const numeric = Number(value);
@@ -999,16 +1021,35 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     await this.binance.setLeverage(decision.symbol, leverage);
-    const quantityParam = normalized?.quantityText ?? quantity;
+
     let result;
     try {
-      result = await this.binance.placeMarketOrder(decision.symbol, side, quantityParam, {
-        responseType: 'RESULT',
-      });
+      const attempt = await this.placeMarketOrderWithRetries(
+        decision,
+        side,
+        normalized,
+        referencePrice,
+        rawQuantity
+      );
+      if (!attempt) {
+        logger.warn({ decision, normalized }, 'Market order aborted after retry attempts');
+        return;
+      }
+      result = attempt.result;
+      normalized = attempt.normalized ?? normalized;
+      quantity = normalized?.quantity ?? quantity;
     } catch (error) {
       this.invalidateBalanceCache();
       if (error instanceof Error && /margin is insufficient/i.test(error.message)) {
         logger.error({ decision, error }, 'Binance rejected order due to insufficient margin after guard');
+        return;
+      }
+      if (isPercentPriceError(error)) {
+        logger.error({ decision, error }, 'Binance rejected order due to percent price filter after retries');
+        return;
+      }
+      if (isMaxPositionError(error)) {
+        logger.error({ decision, error }, 'Binance rejected order due to leverage bracket after retries');
         return;
       }
       throw error;
@@ -1029,6 +1070,90 @@ export class TradingEngine extends TypedEventEmitter {
     this.invalidatePositionCache();
     this.invalidateBalanceCache();
     logger.info({ decision, result }, 'Executed market order');
+  }
+
+  async placeMarketOrderWithRetries(decision, side, initialNormalized, referencePrice, rawQuantity) {
+    const maxAttempts = 3;
+    let attempt = 0;
+    let currentNormalized = initialNormalized;
+    let currentRawQuantity = rawQuantity;
+    let lastError = null;
+
+    while (attempt < maxAttempts) {
+      if (!currentNormalized || !Number.isFinite(currentNormalized.quantity) || currentNormalized.quantity <= 0) {
+        break;
+      }
+
+      const quantityParam = currentNormalized.quantityText ?? currentNormalized.quantity;
+      try {
+        const result = await this.binance.placeMarketOrder(decision.symbol, side, quantityParam, {
+          responseType: 'RESULT',
+        });
+        if (attempt > 0) {
+          logger.debug(
+            {
+              symbol: decision.symbol,
+              attempts: attempt + 1,
+              finalQuantity: currentNormalized.quantity,
+            },
+            'Market order succeeded after retries'
+          );
+        }
+        return { result, normalized: currentNormalized };
+      } catch (error) {
+        lastError = error;
+
+        if (!(isPercentPriceError(error) || isMaxPositionError(error))) {
+          throw error;
+        }
+
+        if (attempt >= maxAttempts - 1) {
+          break;
+        }
+
+        currentRawQuantity *= 0.5;
+        if (!Number.isFinite(currentRawQuantity) || currentRawQuantity <= 0) {
+          break;
+        }
+
+        const nextNormalized = await this.binance.ensureTradableQuantity(
+          decision.symbol,
+          currentRawQuantity,
+          referencePrice
+        );
+
+        if (!nextNormalized || !Number.isFinite(nextNormalized.quantity) || nextNormalized.quantity <= 0) {
+          break;
+        }
+
+        if (
+          currentNormalized &&
+          Math.abs(nextNormalized.quantity - currentNormalized.quantity) <=
+            Math.max(1e-8, currentNormalized.quantity * 1e-4)
+        ) {
+          break;
+        }
+
+        logger.warn(
+          {
+            symbol: decision.symbol,
+            attempt: attempt + 1,
+            retryQuantity: nextNormalized.quantity,
+            reason: isPercentPriceError(error) ? 'percent_price' : 'max_position',
+          },
+          'Retrying market order with reduced quantity'
+        );
+
+        currentNormalized = nextNormalized;
+        attempt += 1;
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+
+    return null;
   }
 
   async executeExit(decision) {
