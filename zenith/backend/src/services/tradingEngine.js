@@ -208,11 +208,9 @@ export class TradingEngine extends TypedEventEmitter {
       return { symbols: this.getActiveSymbols(), movers: this.getTopMovers() };
     }
 
-    const configuredMax = Math.max(Number(discovery.maxActiveSymbols ?? 0), this.baseSymbols.length);
-    const dynamicBudget = Math.max(configuredMax - this.baseSymbols.length, 0);
+    const configuredMax = Math.max(Number(discovery.maxActiveSymbols ?? 0), this.baseSymbols.length, 40);
     const fetchLimit = Math.max(
       Number(discovery.topMoverLimit ?? 0),
-      dynamicBudget > 0 ? dynamicBudget : 0,
       20
     );
 
@@ -229,11 +227,35 @@ export class TradingEngine extends TypedEventEmitter {
       const dynamicCandidates = movers
         .map((item) => item.symbol)
         .filter((symbol) => !baseSet.has(symbol));
-      const limitedDynamics = dynamicBudget > 0
-        ? dynamicCandidates.slice(0, dynamicBudget)
-        : dynamicCandidates;
+      const routeLimit = Math.max(Number(discovery.routeLimit ?? 0) || 0, 10);
+      const dynamicQuota = Math.min(
+        dynamicCandidates.length,
+        Math.min(Math.max(routeLimit, configuredMax - this.baseSymbols.length), configuredMax)
+      );
+      const baseQuota = Math.max(0, Math.min(this.baseSymbols.length, configuredMax - dynamicQuota));
 
-      const nextSymbols = [...this.baseSymbols, ...limitedDynamics];
+      const trimmedBase = [];
+      const addBaseSymbol = (symbol) => {
+        if (!symbol) return;
+        if (!this.baseSymbols.includes(symbol)) return;
+        if (!trimmedBase.includes(symbol)) {
+          trimmedBase.push(symbol);
+        }
+      };
+
+      ['BTCUSDT', 'ETHUSDT'].forEach((symbol) => addBaseSymbol(symbol));
+      for (const symbol of this.baseSymbols) {
+        if (trimmedBase.length >= baseQuota) {
+          break;
+        }
+        addBaseSymbol(symbol);
+      }
+
+      const limitedDynamics = dynamicCandidates.slice(0, dynamicQuota > 0 ? dynamicQuota : routeLimit);
+      const nextSymbols = Array.from(new Set([...trimmedBase, ...limitedDynamics]));
+      if (nextSymbols.length > configuredMax) {
+        nextSymbols.length = configuredMax;
+      }
       const tradable = await this.binance.filterTradableSymbols(nextSymbols, discovery.quoteAssets);
       if (tradable.length === 0) {
         logger.warn('Binance symbol scan returned no tradable instruments, falling back to base set');
@@ -415,15 +437,12 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const position = await this.getPosition(symbol);
-    const priceReference = Number(snapshot?.metrics?.lastPrice);
-    const normalizedPrice = Number.isFinite(priceReference) && priceReference > 0 ? priceReference : undefined;
-
-    const decision = await this.resolveDecision(symbol, snapshot, tick, contextSnapshot);
+    const decision = await this.resolveDecision(symbol, snapshot, tick, contextSnapshot, position);
     await this.recorder.recordStrategy(decision, this.riskLevel);
     return decision;
   }
 
-  async resolveDecision(symbol, snapshot, tick, contextSnapshot) {
+  async resolveDecision(symbol, snapshot, tick, contextSnapshot, position) {
     const round = (value, digits = 2) => {
       if (!Number.isFinite(value)) return 0;
       return Number(value.toFixed(digits));
@@ -453,6 +472,29 @@ export class TradingEngine extends TypedEventEmitter {
         return words.join(' ');
       }
       return `${words.slice(0, wordLimit).join(' ')}...`;
+    };
+
+    const summarizePosition = (livePosition, price) => {
+      if (!livePosition) {
+        return { side: 'flat' };
+      }
+
+      const entry = Number(livePosition.entryPrice);
+      const priceRef = Number(price);
+      let unrealizedPct;
+      if (Number.isFinite(entry) && entry > 0 && Number.isFinite(priceRef) && priceRef > 0) {
+        const delta = livePosition.side === 'long' ? priceRef - entry : entry - priceRef;
+        unrealizedPct = Number(((delta / entry) * 100).toFixed(2));
+      }
+
+      return {
+        side: livePosition.side,
+        quantity: Number.isFinite(livePosition.quantity)
+          ? Number(livePosition.quantity.toFixed(4))
+          : undefined,
+        entryPrice: Number.isFinite(entry) ? Number(entry.toFixed(2)) : undefined,
+        unrealizedPct,
+      };
     };
 
     const condensePromptContext = (context, emphasiseLocal) => {
@@ -520,7 +562,9 @@ export class TradingEngine extends TypedEventEmitter {
         };
       }
 
-      return JSON.stringify(base);
+      base.active_position = summarizePosition(position, context.price ?? priceReference);
+
+      return base;
     };
 
     const priceReference = snapshot.metrics.lastPrice;
@@ -546,8 +590,78 @@ export class TradingEngine extends TypedEventEmitter {
       localSignal.bias !== 'flat' &&
       ((localSignal.confidence >= 0.68 && localEdge >= 0.48) || localSignal.confidence >= 0.82 || localEdge >= 0.62);
 
-    const contextForAi =
-      condensePromptContext(promptSnapshot, strongLocalSignal) ?? snapshot.promptContext;
+    const ensureActivePosition = (payload) => {
+      if (!payload) return null;
+      if (typeof payload === 'string') {
+        try {
+          const parsed = JSON.parse(payload);
+          parsed.active_position = summarizePosition(position, priceReference);
+          return parsed;
+        } catch (error) {
+          logger.warn({ error, symbol }, 'Unable to enrich prompt context payload');
+          return payload;
+        }
+      }
+      if (typeof payload === 'object') {
+        return {
+          ...payload,
+          active_position: summarizePosition(position, priceReference),
+        };
+      }
+      return payload;
+    };
+
+    const contextForAi = ensureActivePosition(
+      condensePromptContext(promptSnapshot, strongLocalSignal) ?? snapshot.promptContext
+    );
+
+    const applyPositionContext = (decision) => {
+      if (!decision) return decision;
+
+      const annotated = { ...decision };
+      const livePosition = position;
+      if (!livePosition) {
+        annotated.livePositionSide = 'flat';
+        annotated.livePositionSize = 0;
+        annotated.livePositionEntry = undefined;
+        if (annotated.action === 'hold') {
+          annotated.action = 'entry';
+        }
+        return annotated;
+      }
+
+      annotated.livePositionSide = livePosition.side;
+      annotated.livePositionSize = livePosition.quantity;
+      annotated.livePositionEntry = livePosition.entryPrice;
+
+      if (Number.isFinite(priceReference) && Number.isFinite(livePosition.entryPrice) && livePosition.entryPrice > 0) {
+        const delta = livePosition.side === 'long'
+          ? priceReference - livePosition.entryPrice
+          : livePosition.entryPrice - priceReference;
+        annotated.livePositionUnrealizedPct = Number(((delta / livePosition.entryPrice) * 100).toFixed(2));
+      }
+
+      const reasoning = typeof annotated.reasoning === 'string' ? annotated.reasoning : '';
+
+      if (annotated.bias === 'flat' || annotated.action === 'exit') {
+        annotated.action = 'exit';
+        if (!/Closing/i.test(reasoning)) {
+          annotated.reasoning = `${reasoning} · Closing ${livePosition.side} exposure`.trim();
+        }
+      } else if (annotated.bias === livePosition.side) {
+        annotated.action = 'hold';
+        if (!/Maintaining/i.test(reasoning)) {
+          annotated.reasoning = `${reasoning} · Maintaining ${livePosition.side} position`.trim();
+        }
+      } else {
+        annotated.action = 'flip';
+        if (!/Flip/i.test(reasoning)) {
+          annotated.reasoning = `${reasoning} · Flip ${livePosition.side}→${annotated.bias}`.trim();
+        }
+      }
+
+      return annotated;
+    };
 
     const previousContext = cached?.contextSnapshot;
     const hasContextSnapshots = Boolean(previousContext && promptSnapshot);
@@ -577,7 +691,7 @@ export class TradingEngine extends TypedEventEmitter {
       const driftPct = priceDrift * 100;
       const contextShiftValue = Number.isFinite(contextShift) ? Number(contextShift.toFixed(3)) : null;
       const { usage: _usage, ...rest } = cached.decision;
-      const reused = {
+      const reused = applyPositionContext({
         ...rest,
         reasoning: `${rest.reasoning} · ${reuseReason} (price drift ${round(driftPct, 3)}%)`,
         localEdge,
@@ -585,7 +699,7 @@ export class TradingEngine extends TypedEventEmitter {
         localBias: localSignal.bias,
         entryPrice: priceReference,
         confidence: clampConfidence(rest.confidence, localConfidence),
-      };
+      });
       this.decisionCache.set(symbol, {
         ...cached,
         decision: reused,
@@ -616,7 +730,10 @@ export class TradingEngine extends TypedEventEmitter {
       localConfidence,
       localBias: localSignal.bias,
       entryPrice: priceReference,
-      promptContextSize: typeof contextForAi === 'string' ? contextForAi.length : undefined,
+      promptContextSize:
+        typeof contextForAi === 'string'
+          ? contextForAi.length
+          : JSON.stringify(contextForAi ?? {}).length,
     };
     if (!enhanced.action) {
       enhanced.action = 'entry';
@@ -641,15 +758,17 @@ export class TradingEngine extends TypedEventEmitter {
       enhanced.marketTime = new Date(tick.eventTime).toISOString();
     }
 
+    const positionedDecision = applyPositionContext(enhanced);
+
     this.decisionCache.set(symbol, {
-      decision: enhanced,
+      decision: positionedDecision,
       price: priceReference,
       timestamp: now,
       source: 'openai',
       contextSnapshot: promptSnapshot ?? null,
       model: enhanced.model ?? llmDecision.model ?? 'openai',
     });
-    return enhanced;
+    return positionedDecision;
   }
 
   async executeDecision(decision) {
@@ -658,14 +777,25 @@ export class TradingEngine extends TypedEventEmitter {
       return;
     }
 
-    if (decision.action === 'exit') {
+    const livePosition = await this.getPosition(decision.symbol);
+
+    if (decision.action === 'exit' || decision.bias === 'flat') {
       await this.executeExit(decision);
       return;
     }
 
-    if (decision.bias === 'flat') {
-      logger.info({ decision }, 'Skipping execution due to neutral signal');
+    if (livePosition && decision.bias === livePosition.side) {
+      logger.info({ decision }, 'Maintaining existing position aligned with bias');
       return;
+    }
+
+    if (livePosition && decision.bias && decision.bias !== livePosition.side) {
+      await this.executeExit({
+        ...decision,
+        action: 'exit',
+        closeBias: decision.bias,
+        reasoning: `${decision.reasoning ?? ''} · Exiting ${livePosition.side} to flip`,
+      });
     }
 
     if (!this.hasStrongConviction(decision)) {
