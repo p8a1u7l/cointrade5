@@ -9,12 +9,15 @@ export interface PlaceOrderParams {
   quantity: number;
   price?: number;
   timeInForce?: TimeInForce;
+  reduceOnly?: boolean;
 }
 
 export interface PlaceOrderAck {
   orderId: string;
   price: number;
   origQty: number;
+  avgPrice?: number;
+  executedQty?: number;
 }
 
 export interface IExchange {
@@ -30,6 +33,8 @@ export class MockExchange implements IExchange {
       orderId: `${params.symbol}-${Date.now()}`,
       price,
       origQty: params.quantity,
+      avgPrice: price,
+      executedQty: params.quantity,
     };
   }
 }

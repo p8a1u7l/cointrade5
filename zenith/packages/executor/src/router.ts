@@ -65,12 +65,12 @@ export async function routeOrder(ex: IExchange, params:{
   lastLatency = Date.now()-m0;
   // 체결 결과 수신 후 요약 반환 (간소화)
   const done = await waitFill(ex, params.symbol, mkt, 250);
-  if (done) {
-    avgPrice = done.avgPrice;
-    cumulativeFills = done.filled;
-    fills.push({price: avgPrice, qty: done.filled, ts: Date.now()});
-    return { accepted:true, avgPrice, filledQty:cumulativeFills, slipBp: estimateSlipBp(avgPrice, price), latencyMs:lastLatency, fills };
-  }
+    if (done) {
+      avgPrice = done.avgPrice;
+      cumulativeFills = done.filled;
+      fills.push({price: avgPrice, qty: done.filled, ts: Date.now()});
+      return { accepted:true, avgPrice, filledQty:cumulativeFills, slipBp: estimateSlipBp(avgPrice, price), latencyMs:lastLatency, fills };
+    }
   return { accepted:false, reason:"fallback market fill failed" };
 }
 
@@ -92,5 +92,31 @@ async function waitPartialFill(ex:IExchange, symbol:string, ack:any, ms=120): Pr
 }
 async function waitFill(ex:IExchange, symbol:string, ack:any, ms=250): Promise<{filled:number, avgPrice:number}|null> {
   await delay(ms);
-  return {filled: ack?.origQty ?? 0, avgPrice: ack?.price ?? 0};
+  const avg = Number.isFinite(ack?.avgPrice) && ack.avgPrice > 0 ? ack.avgPrice : ack?.price ?? 0;
+  const filled = Number.isFinite(ack?.executedQty) && ack.executedQty > 0 ? ack.executedQty : ack?.origQty ?? 0;
+  return {filled, avgPrice: avg};
+}
+
+export async function closePosition(ex: IExchange, params:{
+  symbol: string;
+  side: "BUY"|"SELL";
+  qty: number;
+}): Promise<RouteReport> {
+  const start = Date.now();
+  const ack = await ex.place({
+    symbol: params.symbol,
+    side: params.side,
+    type: "MARKET",
+    quantity: params.qty,
+    reduceOnly: true,
+  });
+  const latencyMs = Date.now() - start;
+  const avgPriceSource = typeof ack.avgPrice === "number" && Number.isFinite(ack.avgPrice) && ack.avgPrice > 0
+    ? ack.avgPrice
+    : ack.price;
+  const filledQtySource = typeof ack.executedQty === "number" && Number.isFinite(ack.executedQty) && ack.executedQty > 0
+    ? ack.executedQty
+    : ack.origQty;
+  const fills = [{ price: avgPriceSource, qty: filledQtySource, ts: Date.now() }];
+  return { accepted: true, avgPrice: avgPriceSource, filledQty: filledQtySource, latencyMs, slipBp: 0, fills };
 }
