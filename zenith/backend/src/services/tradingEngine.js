@@ -874,12 +874,58 @@ export class TradingEngine extends TypedEventEmitter {
       DEFAULT_CONFIDENCE_GUESS,
       this.getCachedAvailableMargin()
     );
-    const llmDecision = await requestStrategy(symbol, contextForAi, {
-      riskLevel: this.riskLevel,
-      leverage: leveragePreset,
-      allocationPercent: this.getAllocationPercent(),
-      estimatedNotional,
-    });
+    let llmDecision;
+    try {
+      llmDecision = await requestStrategy(symbol, contextForAi, {
+        riskLevel: this.riskLevel,
+        leverage: leveragePreset,
+        allocationPercent: this.getAllocationPercent(),
+        estimatedNotional,
+      });
+    } catch (error) {
+      logger.error({ error, symbol }, 'Failed to request OpenAI decision, applying fallback');
+
+      const fallbackBase = position
+        ? {
+            symbol,
+            bias: 'flat',
+            action: 'exit',
+            closeBias: position.side,
+            confidence: clampConfidence(Math.max(localConfidence, 0.8), 0.8),
+            reasoning: 'LLM decision unavailable — flattening via market exit',
+            entryPrice: Number.isFinite(position?.entryPrice) ? position.entryPrice : undefined,
+            referencePrice: priceReference,
+            timestamp: new Date().toISOString(),
+            source: 'fallback',
+          }
+        : {
+            symbol,
+            bias: 'flat',
+            action: 'hold',
+            confidence: clampConfidence(localConfidence, 0.2),
+            reasoning: 'LLM decision unavailable — standing aside',
+            referencePrice: priceReference,
+            timestamp: new Date().toISOString(),
+            source: 'fallback',
+          };
+
+      const fallbackDecision = applyPositionContext({
+        ...fallbackBase,
+        localEdge,
+        localConfidence,
+        localBias: localSignal.bias,
+      });
+
+      this.decisionCache.set(symbol, {
+        decision: fallbackDecision,
+        price: priceReference,
+        timestamp: now,
+        source: 'fallback',
+        contextSnapshot: promptSnapshot ?? null,
+      });
+
+      return fallbackDecision;
+    }
     const enhanced = {
       ...llmDecision,
       bias: llmDecision.bias ?? localSignal.bias,
