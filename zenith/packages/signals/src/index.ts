@@ -41,25 +41,30 @@ function pickEntryPrice(repPrice: number | undefined, fallback: number): number 
   return fallback;
 }
 
-async function closeWithMarket(
+async function closeAtPrice(
   ex: IExchange,
   symbol: string,
   position: ActivePosition,
   quantity: number,
+  orderPrice: number,
   priceHint: number
 ): Promise<{ realized: number; filled: number } | null> {
   if (!Number.isFinite(quantity) || quantity <= POSITION_EPSILON) {
     return null;
   }
   const orderSide = position.side === "LONG" ? "SELL" : "BUY";
-  const report = await closePosition(ex, { symbol, side: orderSide, qty: quantity });
+  const price = Number.isFinite(orderPrice) && orderPrice > 0 ? orderPrice : priceHint;
+  if (!Number.isFinite(price) || price <= 0) {
+    return null;
+  }
+  const report = await closePosition(ex, { symbol, side: orderSide, qty: quantity, price });
   if (!report.accepted) {
     return null;
   }
   const filledQty = Number.isFinite(report.filledQty) && (report.filledQty ?? 0) > 0
     ? (report.filledQty as number)
     : quantity;
-  const exitPrice = pickEntryPrice(report.avgPrice, priceHint);
+  const exitPrice = pickEntryPrice(report.avgPrice, priceHint ?? price);
   const realized = computeRealizedPnl(position, exitPrice, filledQty);
   recordRealized(symbol, realized);
   return { realized, filled: filledQty };
@@ -111,7 +116,9 @@ export async function loop(ex: IExchange, symbol: string) {
     active.plan.sl = updatedStop;
 
     if (stopTriggered(active, last)) {
-      const result = await closeWithMarket(ex, symbol, active, active.qty, last.close);
+      const stopPrice = active.plan.sl;
+      const priceHint = Number.isFinite(stopPrice) ? stopPrice : last.close;
+      const result = await closeAtPrice(ex, symbol, active, active.qty, stopPrice, priceHint);
       if (result) {
         activePositions.delete(symbol);
       }
@@ -121,7 +128,8 @@ export async function loop(ex: IExchange, symbol: string) {
     const tp1Reached = !active.hitTP1 && active.plan.tp1 && targetHit(active, active.plan.tp1, last);
     if (tp1Reached) {
       const partialQty = Math.max(1, Math.floor(active.qty / 2));
-      const result = await closeWithMarket(ex, symbol, active, partialQty, last.close);
+      const tp1Price = active.plan.tp1 as number;
+      const result = await closeAtPrice(ex, symbol, active, partialQty, tp1Price, tp1Price);
       if (result) {
         active.qty = Math.max(0, active.qty - result.filled);
         active.hitTP1 = true;
@@ -131,7 +139,8 @@ export async function loop(ex: IExchange, symbol: string) {
 
     const tp2Target = active.plan.tp2 ?? active.plan.tp1;
     if (targetHit(active, tp2Target, last)) {
-      const result = await closeWithMarket(ex, symbol, active, active.qty, last.close);
+      const targetPrice = tp2Target ?? last.close;
+      const result = await closeAtPrice(ex, symbol, active, active.qty, targetPrice, targetPrice ?? last.close);
       if (result) {
         activePositions.delete(symbol);
       }

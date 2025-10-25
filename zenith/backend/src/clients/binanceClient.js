@@ -780,6 +780,35 @@ export class BinanceClient {
     }
   }
 
+  async placeLimitOrder(symbol, side, quantity, price, options = {}) {
+    try {
+      const payload = {
+        symbol,
+        side,
+        type: 'LIMIT',
+        quantity,
+        price,
+        timeInForce: options.timeInForce ?? 'GTC',
+        newOrderRespType: options.responseType ?? 'RESULT',
+      };
+
+      if (options.reduceOnly === true) {
+        payload.reduceOnly = true;
+      }
+
+      const data = await this.request('POST', '/fapi/v1/order', payload);
+      return {
+        orderId: String(data.orderId),
+        status: data.status,
+        avgPrice: Number(data.avgPrice ?? data.price ?? 0),
+        executedQty: Number(data.executedQty ?? data.cumQty ?? data.origQty ?? 0),
+      };
+    } catch (error) {
+      logger.error({ error, symbol, side, quantity, price }, 'Failed to execute Binance limit order');
+      throw error;
+    }
+  }
+
   async fetchTopMovers(options = {}) {
     const limit = Number.isFinite(options.limit) ? Number(options.limit) : 50;
     const minQuoteVolume = Number.isFinite(options.minQuoteVolume)

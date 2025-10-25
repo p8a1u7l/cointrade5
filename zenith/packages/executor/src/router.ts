@@ -101,13 +101,21 @@ export async function closePosition(ex: IExchange, params:{
   symbol: string;
   side: "BUY"|"SELL";
   qty: number;
+  price: number;
 }): Promise<RouteReport> {
+  const { symbol, side, qty, price } = params;
+  if (!Number.isFinite(price) || price <= 0) {
+    return { accepted: false, reason: "invalid price" };
+  }
+
   const start = Date.now();
   const ack = await ex.place({
-    symbol: params.symbol,
-    side: params.side,
-    type: "MARKET",
-    quantity: params.qty,
+    symbol,
+    side,
+    type: "LIMIT",
+    timeInForce: "GTC",
+    quantity: qty,
+    price,
     reduceOnly: true,
   });
   const latencyMs = Date.now() - start;
@@ -118,5 +126,8 @@ export async function closePosition(ex: IExchange, params:{
     ? ack.executedQty
     : ack.origQty;
   const fills = [{ price: avgPriceSource, qty: filledQtySource, ts: Date.now() }];
-  return { accepted: true, avgPrice: avgPriceSource, filledQty: filledQtySource, latencyMs, slipBp: 0, fills };
+  const slip = Number.isFinite(avgPriceSource)
+    ? estimateSlipBp(avgPriceSource, price)
+    : 0;
+  return { accepted: true, avgPrice: avgPriceSource, filledQty: filledQtySource, latencyMs, slipBp: slip, fills };
 }

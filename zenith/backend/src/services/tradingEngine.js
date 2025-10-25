@@ -892,7 +892,7 @@ export class TradingEngine extends TypedEventEmitter {
             action: 'exit',
             closeBias: position.side,
             confidence: clampConfidence(Math.max(localConfidence, 0.8), 0.8),
-            reasoning: 'LLM decision unavailable — flattening via market exit',
+            reasoning: 'LLM decision unavailable — flattening via limit exit',
             entryPrice: Number.isFinite(position?.entryPrice) ? position.entryPrice : undefined,
             referencePrice: priceReference,
             timestamp: new Date().toISOString(),
@@ -1240,9 +1240,23 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const quantityParam = normalized?.quantityText ?? Number(exitQuantity.toFixed(6));
-    const result = await this.binance.placeMarketOrder(decision.symbol, orderSide, quantityParam, {
+    const exitPrice = Number.isFinite(referencePrice)
+      ? referencePrice
+      : Number.isFinite(tick?.price)
+      ? tick.price
+      : Number.isFinite(position.entryPrice)
+      ? position.entryPrice
+      : undefined;
+
+    if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
+      logger.warn({ decision, referencePrice, position }, 'Skipping exit due to missing price reference');
+      return;
+    }
+
+    const result = await this.binance.placeLimitOrder(decision.symbol, orderSide, quantityParam, exitPrice, {
       responseType: 'RESULT',
       reduceOnly: true,
+      timeInForce: 'GTC',
     });
     const exitEntryPrice = Number.isFinite(decision.entryPrice)
       ? decision.entryPrice
@@ -1275,7 +1289,7 @@ export class TradingEngine extends TypedEventEmitter {
     );
     this.invalidatePositionCache();
     this.invalidateBalanceCache();
-    logger.info({ decision, result }, 'Closed position via strategy exit');
+    logger.info({ decision, result, exitPrice }, 'Closed position via strategy exit');
   }
 
   calculateOrderSize(symbol, leverage, confidence, referencePrice, availableOverride) {
