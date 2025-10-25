@@ -53,6 +53,7 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const hasFittedRef = useRef(false);
+  const resizeRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -142,6 +143,8 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
       return;
     }
 
+    container.style.width = '100%';
+
     const chart = createChart(container, {
       layout: {
         background: { color: 'transparent' },
@@ -193,10 +196,23 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
     candleSeriesRef.current = series;
 
     const resize = () => {
-      if (!chartContainerRef.current) return;
-      const width = chartContainerRef.current.clientWidth || 600;
+      const containerRef = chartContainerRef.current;
+      if (!containerRef) return;
+
+      const parentWidth = containerRef.parentElement?.getBoundingClientRect().width;
+      const containerWidth = containerRef.getBoundingClientRect().width;
+      const measuredWidth = parentWidth && parentWidth > 0 ? parentWidth : containerWidth;
+
+      if (!measuredWidth || measuredWidth <= 0) {
+        if (typeof window !== 'undefined') {
+          resizeRafRef.current = window.requestAnimationFrame(resize);
+        }
+        return;
+      }
+
+      const width = Math.max(320, Math.floor(measuredWidth));
       const height = Math.max(320, Math.min(560, Math.floor(width * 0.45)));
-      chartContainerRef.current.style.height = `${height}px`;
+      containerRef.style.height = `${height}px`;
       chart.applyOptions({ width, height });
     };
 
@@ -211,6 +227,10 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
     }
 
     return () => {
+      if (resizeRafRef.current !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
       if (observer) {
         observer.disconnect();
       } else {
@@ -303,7 +323,7 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
         </div>
       ) : (
         <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-slate-900/60 to-slate-950/90">
-          <div ref={chartContainerRef} className="w-full" />
+          <div ref={chartContainerRef} className="w-full" style={{ minHeight: 320 }} />
           {lastCandle && (
             <div className="pointer-events-none absolute right-4 top-4 rounded-full bg-slate-900/80 px-3 py-1 text-xs font-semibold text-sky-100 ring-1 ring-sky-400/40">
               {formatUsd(lastCandle.close)} · {formatTime(lastCandle.timestamp)}

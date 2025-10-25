@@ -415,21 +415,51 @@ export class TradingEngine extends TypedEventEmitter {
       throw error;
     }
 
-    const position = await this.getPosition(symbol);
-    if (this.strategyAdapter) {
-      const localDecision = this.strategyAdapter.evaluate(symbol, snapshot, position);
-      if (localDecision) {
-        await this.recorder.recordStrategy(localDecision, this.riskLevel);
-        return localDecision;
+    let contextSnapshot = null;
+    if (typeof snapshot.promptContext === 'string' && snapshot.promptContext.length > 0) {
+      try {
+        contextSnapshot = JSON.parse(snapshot.promptContext);
+      } catch (error) {
+        logger.debug({ error, symbol }, 'Unable to parse prompt context for strategy evaluation');
       }
     }
 
-    const decision = await this.resolveDecision(symbol, snapshot, tick);
+    const position = await this.getPosition(symbol);
+    const priceReference = Number(snapshot?.metrics?.lastPrice);
+    const normalizedPrice = Number.isFinite(priceReference) && priceReference > 0 ? priceReference : undefined;
+
+    if (this.strategyAdapter) {
+      const localDecision = this.strategyAdapter.evaluate(symbol, snapshot, position);
+      if (localDecision) {
+        const directEntry = Number(localDecision.entryPrice);
+        const entryPrice = Number.isFinite(directEntry) && directEntry > 0 ? directEntry : normalizedPrice;
+        const enrichedLocalDecision = {
+          ...localDecision,
+          entryPrice,
+        };
+
+        const cachePrice = Number.isFinite(entryPrice) ? entryPrice : normalizedPrice ?? null;
+
+        this.decisionCache.set(symbol, {
+          decision: enrichedLocalDecision,
+          price: cachePrice,
+          timestamp: Date.now(),
+          source: 'strategy',
+          contextSnapshot,
+          model: enrichedLocalDecision.model ?? `strategy:${enrichedLocalDecision.strategyKey ?? 'local'}`,
+        });
+
+        await this.recorder.recordStrategy(enrichedLocalDecision, this.riskLevel);
+        return enrichedLocalDecision;
+      }
+    }
+
+    const decision = await this.resolveDecision(symbol, snapshot, tick, contextSnapshot);
     await this.recorder.recordStrategy(decision, this.riskLevel);
     return decision;
   }
 
-  async resolveDecision(symbol, snapshot, tick) {
+  async resolveDecision(symbol, snapshot, tick, contextSnapshot) {
     const round = (value, digits = 2) => {
       if (!Number.isFinite(value)) return 0;
       return Number(value.toFixed(digits));
@@ -533,11 +563,13 @@ export class TradingEngine extends TypedEventEmitter {
     const localSignal = snapshot.metrics.localSignal;
     const localEdge = Number.isFinite(localSignal?.edgeScore) ? localSignal.edgeScore : 0;
     const localConfidence = clampConfidence(localSignal?.confidence, 0);
-    let promptSnapshot;
-    try {
-      promptSnapshot = JSON.parse(snapshot.promptContext);
-    } catch (error) {
-      logger.warn({ error, symbol }, 'Failed to parse prompt context for cache heuristics');
+    let promptSnapshot = contextSnapshot ?? null;
+    if (!promptSnapshot && typeof snapshot.promptContext === 'string' && snapshot.promptContext.length > 0) {
+      try {
+        promptSnapshot = JSON.parse(snapshot.promptContext);
+      } catch (error) {
+        logger.warn({ error, symbol }, 'Failed to parse prompt context for cache heuristics');
+      }
     }
     const now = Date.now();
     const cached = this.decisionCache.get(symbol);
