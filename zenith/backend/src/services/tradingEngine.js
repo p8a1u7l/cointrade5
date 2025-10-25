@@ -5,7 +5,6 @@ import { config } from '../config.js';
 import { analyticsStore } from '../store/analyticsStore.js';
 import { logger } from '../utils/logger.js';
 import { TypedEventEmitter } from '../utils/eventEmitter.js';
-import { StrategyTradeAdapter } from '../strategies/StrategyAdapter.js';
 import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
 
@@ -89,7 +88,6 @@ export class TradingEngine extends TypedEventEmitter {
     this.stream = new BinanceRealtimeFeed();
     this.latestTicks = new Map();
     this.decisionCache = new Map();
-    this.strategyAdapter = new StrategyTradeAdapter({ logger });
     this.positionCache = { timestamp: 0, map: new Map() };
     this.balanceCache = { timestamp: 0, available: 0 };
     this.loopInFlight = false;
@@ -144,26 +142,18 @@ export class TradingEngine extends TypedEventEmitter {
 
   projectPosition(symbol, raw) {
     if (!raw || !Number.isFinite(raw.positionAmt) || Math.abs(raw.positionAmt) < POSITION_EPSILON) {
-      if (this.strategyAdapter?.getPositionMeta(symbol)) {
-        this.strategyAdapter.clearPosition(symbol);
-      }
       return null;
     }
 
     const side = raw.positionAmt > 0 ? 'long' : 'short';
     const quantity = Math.abs(raw.positionAmt);
     const entryPrice = toNumber(raw.entryPrice);
-    const meta = this.strategyAdapter?.getPositionMeta(symbol);
 
     return {
       symbol,
       side,
       quantity,
       entryPrice,
-      entryMove: meta?.entryMove,
-      strategyKey: meta?.strategyKey,
-      strategyName: meta?.strategyName,
-      entryTime: meta?.entryTime,
       raw,
     };
   }
@@ -427,32 +417,6 @@ export class TradingEngine extends TypedEventEmitter {
     const position = await this.getPosition(symbol);
     const priceReference = Number(snapshot?.metrics?.lastPrice);
     const normalizedPrice = Number.isFinite(priceReference) && priceReference > 0 ? priceReference : undefined;
-
-    if (this.strategyAdapter) {
-      const localDecision = this.strategyAdapter.evaluate(symbol, snapshot, position);
-      if (localDecision) {
-        const directEntry = Number(localDecision.entryPrice);
-        const entryPrice = Number.isFinite(directEntry) && directEntry > 0 ? directEntry : normalizedPrice;
-        const enrichedLocalDecision = {
-          ...localDecision,
-          entryPrice,
-        };
-
-        const cachePrice = Number.isFinite(entryPrice) ? entryPrice : normalizedPrice ?? null;
-
-        this.decisionCache.set(symbol, {
-          decision: enrichedLocalDecision,
-          price: cachePrice,
-          timestamp: Date.now(),
-          source: 'strategy',
-          contextSnapshot,
-          model: enrichedLocalDecision.model ?? `strategy:${enrichedLocalDecision.strategyKey ?? 'local'}`,
-        });
-
-        await this.recorder.recordStrategy(enrichedLocalDecision, this.riskLevel);
-        return enrichedLocalDecision;
-      }
-    }
 
     const decision = await this.resolveDecision(symbol, snapshot, tick, contextSnapshot);
     await this.recorder.recordStrategy(decision, this.riskLevel);
@@ -773,7 +737,6 @@ export class TradingEngine extends TypedEventEmitter {
       },
       decision
     );
-    this.strategyAdapter?.notifyExecution(decision, result);
     this.invalidatePositionCache();
     this.invalidateBalanceCache();
     logger.info({ decision, result }, 'Executed market order');
@@ -817,7 +780,6 @@ export class TradingEngine extends TypedEventEmitter {
       },
       recorderDecision
     );
-    this.strategyAdapter?.notifyExit(decision, result);
     this.invalidatePositionCache();
     this.invalidateBalanceCache();
     logger.info({ decision, result }, 'Closed position via strategy exit');

@@ -4,14 +4,15 @@ import type { ReactNode } from 'react';
 export interface PerformanceEntry {
   symbol: string;
   realized_pnl: number;
+  unrealized_pnl?: number;
   trades: number;
   wins: number;
   losses: number;
   breakeven: number;
   win_rate: number;
-  net_contracts: number;
-  avg_entry_price: number;
-  total_volume: number;
+  net_contracts?: number;
+  avg_entry_price?: number;
+  total_volume?: number;
   last_updated?: string;
 }
 
@@ -38,7 +39,11 @@ const integerFormatter = new Intl.NumberFormat(undefined, {
 });
 
 export function PerformanceBoard({ entries, loading = false }: Props) {
-  const sorted = [...entries].sort((a, b) => b.realized_pnl - a.realized_pnl);
+  const sorted = [...entries].sort((a, b) => {
+    const totalA = (a.realized_pnl ?? 0) + (a.unrealized_pnl ?? 0);
+    const totalB = (b.realized_pnl ?? 0) + (b.unrealized_pnl ?? 0);
+    return totalB - totalA;
+  });
 
   return (
     <div className="rounded-3xl border border-white/10 bg-slate-950/70 p-6 shadow-[0_35px_120px_-60px_rgba(37,99,235,0.55)]">
@@ -62,6 +67,7 @@ export function PerformanceBoard({ entries, loading = false }: Props) {
               <tr>
                 <HeaderCell>Symbol</HeaderCell>
                 <HeaderCell align="right">Realized PnL</HeaderCell>
+                <HeaderCell align="right">Unrealized PnL</HeaderCell>
                 <HeaderCell align="right">Win rate</HeaderCell>
                 <HeaderCell align="right">Trades</HeaderCell>
                 <HeaderCell align="right">Wins / Losses</HeaderCell>
@@ -76,25 +82,37 @@ export function PerformanceBoard({ entries, loading = false }: Props) {
                 const tradesLabel = integerFormatter.format(entry.trades ?? 0);
                 const winsLabel = integerFormatter.format(entry.wins ?? 0);
                 const lossesLabel = integerFormatter.format(entry.losses ?? 0);
-                const netContractsLabel = entry.net_contracts.toLocaleString(undefined, {
+                const netContractsValue = Number.isFinite(entry.net_contracts)
+                  ? (entry.net_contracts as number)
+                  : 0;
+                const netContractsLabel = netContractsValue.toLocaleString(undefined, {
                   minimumFractionDigits: 3,
                   maximumFractionDigits: 3,
                 });
                 const avgEntryLabel = currencyFormatter.format(entry.avg_entry_price ?? 0);
+                const totalVolume = Number.isFinite(entry.total_volume)
+                  ? (entry.total_volume as number)
+                  : 0;
+                const unrealizedClass = (entry.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-200' : 'text-rose-200';
 
                 return (
                   <tr key={entry.symbol} className="hover:bg-white/5">
                     <Cell>
                       <div className="font-semibold text-white">{entry.symbol}</div>
-                      {entry.total_volume > 0 && (
+                      {totalVolume > 0 && (
                         <div className="text-xs text-slate-400/80">
-                          Volume {entry.total_volume.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          Volume {totalVolume.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                         </div>
                       )}
                     </Cell>
                     <Cell align="right">
                       <span className={clsx('font-semibold', realizedClass)}>
                         {currencyFormatter.format(entry.realized_pnl ?? 0)}
+                      </span>
+                    </Cell>
+                    <Cell align="right">
+                      <span className={clsx('font-semibold', unrealizedClass)}>
+                        {currencyFormatter.format(entry.unrealized_pnl ?? 0)}
                       </span>
                     </Cell>
                     <Cell align="right">

@@ -12,6 +12,7 @@ interface MetricsPayload {
   equity: number;
   pnlPercent: number;
   realized: number;
+  unrealized?: number;
   riskLevel: number;
   winRate?: number;
   wins?: number;
@@ -236,7 +237,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
               <MetricCard title="Balance" value={metrics?.balance ?? 0} prefix="$" loading={loading} />
               <MetricCard title="Equity" value={metrics?.equity ?? 0} prefix="$" loading={loading} />
               <MetricCard
@@ -246,7 +247,20 @@ export default function App() {
                 loading={loading}
                 accent={metrics && metrics.pnlPercent >= 0 ? 'positive' : 'negative'}
               />
-              <MetricCard title="Realized" value={metrics?.realized ?? 0} prefix="$" loading={loading} />
+              <MetricCard
+                title="Realized"
+                value={metrics?.realized ?? 0}
+                prefix="$"
+                loading={loading}
+                accent={metrics && (metrics.realized ?? 0) >= 0 ? 'positive' : 'negative'}
+              />
+              <MetricCard
+                title="Unrealized"
+                value={metrics?.unrealized ?? 0}
+                prefix="$"
+                loading={loading}
+                accent={metrics && (metrics.unrealized ?? 0) >= 0 ? 'positive' : 'negative'}
+              />
             </div>
 
             <PerformanceBoard entries={metrics?.performance ?? []} loading={loading} />

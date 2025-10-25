@@ -7,8 +7,6 @@
     "build": "node -e \"console.log('Build step skipped: sources are plain JavaScript.')\"",
     "start": "node src/index.js",
     "dev": "node src/index.js",
-    "test": "node src/selfTest.js",
-    "test:strategies": "node scripts/test_strategies.js",
-    "backtest": "node scripts/backtest_strategies.js"
+    "test": "node src/selfTest.js"
   }
 }

@@ -1,6 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { createChart, CrosshairMode } from 'lightweight-charts';
-import type { CandlestickData, IChartApi, ISeriesApi, UTCTimestamp } from 'lightweight-charts';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Area as RechartsArea,
+  AreaChart as RechartsAreaChart,
+  CartesianGrid as RechartsCartesianGrid,
+  ResponsiveContainer as RechartsResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis as RechartsXAxis,
+  YAxis as RechartsYAxis,
+} from 'recharts';
+
+type AnyComponent = (props: any) => JSX.Element | null;
+
+const AreaChart = RechartsAreaChart as unknown as AnyComponent;
+const Area = RechartsArea as unknown as AnyComponent;
+const CartesianGrid = RechartsCartesianGrid as unknown as AnyComponent;
+const ResponsiveContainer = RechartsResponsiveContainer as unknown as AnyComponent;
+const Tooltip = RechartsTooltip as unknown as AnyComponent;
+const XAxis = RechartsXAxis as unknown as AnyComponent;
+const YAxis = RechartsYAxis as unknown as AnyComponent;
 
 interface EquityPoint {
   timestamp: string;
@@ -19,15 +36,23 @@ interface EquityChartProps {
   refreshIntervalMs?: number;
 }
 
-type EquityCandle = (CandlestickData & { timestamp: string });
+interface ChartPoint {
+  timestamp: string;
+  label: string;
+  equity: number;
+  balance: number;
+  pnlPercent: number;
+}
 
-const formatUsd = (value: number) =>
-  value.toLocaleString(undefined, {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+const formatUsd = (value: number, digits: number | undefined = 2) =>
+  Number.isFinite(value)
+    ? value.toLocaleString(undefined, {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      })
+    : '—';
 
 const formatTime = (timestamp: string) => {
   try {
@@ -42,18 +67,33 @@ const formatTime = (timestamp: string) => {
   }
 };
 
-const toUtcTimestamp = (ms: number): UTCTimestamp => Math.floor(ms / 1000) as UTCTimestamp;
+function TooltipContent({ active, payload }: { active?: boolean; payload?: any[] }) {
+  if (!active || !payload || payload.length === 0) {
+    return null;
+  }
+  const point = payload[0]?.payload as ChartPoint | undefined;
+  if (!point) return null;
+  const pnlPercent = Number.isFinite(point.pnlPercent) ? point.pnlPercent : 0;
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-slate-900/90 px-3 py-2 text-xs text-slate-200 shadow-lg">
+      <div className="font-semibold text-white">{point.label}</div>
+      <div className="mt-1 text-[11px] text-slate-300/80">
+        Equity {formatUsd(point.equity)}
+      </div>
+      <div className="text-[11px] text-slate-300/70">Balance {formatUsd(point.balance)}</div>
+      <div className="text-[11px] text-slate-300/70">
+        Change {pnlPercent >= 0 ? '+' : ''}
+        {pnlPercent.toFixed(2)}%
+      </div>
+    </div>
+  );
+}
 
 export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartProps) {
   const [points, setPoints] = useState<EquityPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const chartContainerRef = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const hasFittedRef = useRef(false);
-  const resizeRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,186 +128,29 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
     };
   }, [endpoint, refreshIntervalMs]);
 
-  const enrichedPoints = useMemo(() => {
+  const chartPoints = useMemo<ChartPoint[]>(() => {
     return points
-      .map((point) => ({
-        ...point,
-        time: new Date(point.timestamp).getTime(),
-      }))
-      .filter((point) => Number.isFinite(point.time) && Number.isFinite(point.equity));
+      .map((point) => {
+        const date = new Date(point.timestamp);
+        return {
+          timestamp: point.timestamp,
+          label: formatTime(point.timestamp),
+          equity: Number(point.equity),
+          balance: Number(point.balance),
+          pnlPercent: Number(point.pnlPercent),
+          sortKey: Number.isFinite(date.getTime()) ? date.getTime() : 0,
+        };
+      })
+      .filter((point) => Number.isFinite(point.equity) && Number.isFinite(point.sortKey))
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .map(({ sortKey: _sortKey, ...rest }) => ({
+        ...rest,
+        pnlPercent: Number.isFinite(rest.pnlPercent) ? rest.pnlPercent : 0,
+      }));
   }, [points]);
 
-  const { minEquity, maxEquity } = useMemo(() => {
-    if (enrichedPoints.length === 0) {
-      return { minEquity: 0, maxEquity: 1 };
-    }
-    let min = enrichedPoints[0].equity;
-    let max = enrichedPoints[0].equity;
-    for (const point of enrichedPoints) {
-      if (point.equity < min) min = point.equity;
-      if (point.equity > max) max = point.equity;
-    }
-    if (min === max) {
-      min -= 1;
-      max += 1;
-    }
-    return { minEquity: min, maxEquity: max };
-  }, [enrichedPoints]);
-
-  const candles = useMemo(() => {
-    if (enrichedPoints.length < 2) return [] as EquityCandle[];
-    const series: EquityCandle[] = [];
-    for (let i = 1; i < enrichedPoints.length; i += 1) {
-      const prev = enrichedPoints[i - 1];
-      const current = enrichedPoints[i];
-      const open = prev.equity;
-      const close = current.equity;
-      const balanceValues = [prev.balance, current.balance].filter((value) => Number.isFinite(value)) as number[];
-      const high = Math.max(open, close, ...balanceValues);
-      const low = Math.min(open, close, ...balanceValues);
-      series.push({
-        time: toUtcTimestamp(current.time),
-        timestamp: current.timestamp,
-        open,
-        close,
-        high,
-        low,
-      });
-    }
-    return series;
-  }, [enrichedPoints]);
-
-  useEffect(() => {
-    const container = chartContainerRef.current;
-    if (!container) {
-      return;
-    }
-
-    container.style.width = '100%';
-
-    const chart = createChart(container, {
-      layout: {
-        background: { color: 'transparent' },
-        textColor: '#e2e8f0',
-      },
-      grid: {
-        vertLines: { color: 'rgba(148,163,184,0.12)' },
-        horzLines: { color: 'rgba(148,163,184,0.12)' },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-      },
-      rightPriceScale: {
-        borderVisible: false,
-      },
-      leftPriceScale: {
-        visible: false,
-      },
-      timeScale: {
-        borderVisible: false,
-        timeVisible: true,
-        secondsVisible: true,
-        rightOffset: 6,
-        barSpacing: 18,
-      },
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-        horzTouchDrag: true,
-        vertTouchDrag: false,
-      },
-      handleScale: {
-        axisPressedMouseMove: true,
-        mouseWheel: true,
-        pinch: true,
-      },
-    });
-
-    const series = chart.addCandlestickSeries({
-      upColor: 'rgba(34,197,94,0.8)',
-      downColor: 'rgba(248,113,113,0.8)',
-      borderUpColor: 'rgba(34,197,94,1)',
-      borderDownColor: 'rgba(248,113,113,1)',
-      wickUpColor: 'rgba(134,239,172,0.9)',
-      wickDownColor: 'rgba(252,165,165,0.9)',
-    });
-
-    chartRef.current = chart;
-    candleSeriesRef.current = series;
-
-    const resize = () => {
-      const containerRef = chartContainerRef.current;
-      if (!containerRef) return;
-
-      const parentWidth = containerRef.parentElement?.getBoundingClientRect().width;
-      const containerWidth = containerRef.getBoundingClientRect().width;
-      const measuredWidth = parentWidth && parentWidth > 0 ? parentWidth : containerWidth;
-
-      if (!measuredWidth || measuredWidth <= 0) {
-        if (typeof window !== 'undefined') {
-          resizeRafRef.current = window.requestAnimationFrame(resize);
-        }
-        return;
-      }
-
-      const width = Math.max(320, Math.floor(measuredWidth));
-      const height = Math.max(320, Math.min(560, Math.floor(width * 0.45)));
-      containerRef.style.height = `${height}px`;
-      chart.applyOptions({ width, height });
-    };
-
-    resize();
-
-    let observer: ResizeObserver | undefined;
-    if (typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(() => resize());
-      observer.observe(container);
-    } else {
-      window.addEventListener('resize', resize);
-    }
-
-    return () => {
-      if (resizeRafRef.current !== null && typeof window !== 'undefined') {
-        window.cancelAnimationFrame(resizeRafRef.current);
-        resizeRafRef.current = null;
-      }
-      if (observer) {
-        observer.disconnect();
-      } else {
-        window.removeEventListener('resize', resize);
-      }
-      chart.remove();
-      chartRef.current = null;
-      candleSeriesRef.current = null;
-      hasFittedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    const series = candleSeriesRef.current;
-    const chart = chartRef.current;
-    if (!series || !chart) {
-      return;
-    }
-
-    if (candles.length === 0) {
-      series.setData([]);
-      return;
-    }
-
-    const payload = candles.map(({ timestamp: _timestamp, ...rest }) => rest);
-    series.setData(payload);
-    chart.timeScale().scrollToRealTime();
-
-    if (!hasFittedRef.current) {
-      chart.timeScale().fitContent();
-      hasFittedRef.current = true;
-    }
-  }, [candles]);
-
-  const latestPoint = enrichedPoints.length > 0 ? enrichedPoints[enrichedPoints.length - 1] : null;
-  const earliestPoint = enrichedPoints.length > 0 ? enrichedPoints[0] : null;
-  const lastCandle = candles.length > 0 ? candles[candles.length - 1] : null;
+  const latestPoint = chartPoints.length > 0 ? chartPoints[chartPoints.length - 1] : null;
+  const earliestPoint = chartPoints.length > 0 ? chartPoints[0] : null;
 
   const changePct = useMemo(() => {
     if (!earliestPoint || !latestPoint) return 0;
@@ -276,6 +159,16 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
     if (!Number.isFinite(start) || start === 0) return 0;
     return ((end - start) / start) * 100;
   }, [earliestPoint, latestPoint]);
+
+  const peak = useMemo(() => {
+    if (chartPoints.length === 0) return 0;
+    return chartPoints.reduce((max, point) => (point.equity > max ? point.equity : max), chartPoints[0].equity);
+  }, [chartPoints]);
+
+  const trough = useMemo(() => {
+    if (chartPoints.length === 0) return 0;
+    return chartPoints.reduce((min, point) => (point.equity < min ? point.equity : min), chartPoints[0].equity);
+  }, [chartPoints]);
 
   return (
     <div className="space-y-4 rounded-3xl border border-white/10 bg-slate-950/70 p-6 shadow-[0_30px_70px_-55px_rgba(14,165,233,0.45)]">
@@ -297,15 +190,15 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
             </div>
             <div>
               <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Peak</span>
-              <span className="text-sm font-semibold text-emerald-200">{formatUsd(maxEquity)}</span>
+              <span className="text-sm font-semibold text-emerald-200">{formatUsd(peak)}</span>
             </div>
             <div>
               <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Drawdown</span>
-              <span className="text-sm font-semibold text-rose-200">{formatUsd(minEquity)}</span>
+              <span className="text-sm font-semibold text-rose-200">{formatUsd(trough)}</span>
             </div>
             <div>
               <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Points</span>
-              <span className="text-sm font-semibold text-white">{enrichedPoints.length}</span>
+              <span className="text-sm font-semibold text-white">{chartPoints.length}</span>
             </div>
           </div>
         )}
@@ -317,16 +210,49 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
         <div className="flex h-[360px] items-center justify-center rounded-2xl border border-rose-400/40 bg-rose-500/10 text-sm text-rose-100">
           {error}
         </div>
-      ) : candles.length === 0 ? (
+      ) : chartPoints.length < 2 ? (
         <div className="flex h-[360px] items-center justify-center rounded-2xl border border-white/10 bg-slate-900/60 text-sm text-slate-300/70">
           Not enough equity history yet.
         </div>
       ) : (
-        <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-slate-900/60 to-slate-950/90">
-          <div ref={chartContainerRef} className="w-full" style={{ minHeight: 320 }} />
-          {lastCandle && (
+        <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-slate-900/60 to-slate-950/90 px-2 py-2">
+          <ResponsiveContainer width="100%" height={340}>
+            <AreaChart data={chartPoints} margin={{ left: 12, right: 12, top: 12, bottom: 0 }}>
+              <defs>
+                <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="rgba(56,189,248,0.85)" stopOpacity={0.9} />
+                  <stop offset="95%" stopColor="rgba(56,189,248,0.1)" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="rgba(148,163,184,0.12)" vertical={false} />
+              <XAxis
+                dataKey="label"
+                tickLine={false}
+                axisLine={false}
+                minTickGap={32}
+                tick={{ fill: 'rgba(226,232,240,0.7)', fontSize: 12 }}
+              />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(value: number) => formatUsd(value, 0)}
+                tick={{ fill: 'rgba(226,232,240,0.7)', fontSize: 12 }}
+              />
+              <Tooltip content={<TooltipContent />} cursor={{ stroke: 'rgba(148,163,184,0.2)', strokeWidth: 1 }} />
+              <Area
+                type="monotone"
+                dataKey="equity"
+                stroke="rgba(56,189,248,0.95)"
+                strokeWidth={2.4}
+                fill="url(#equityGradient)"
+                dot={false}
+                isAnimationActive={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+          {latestPoint && (
             <div className="pointer-events-none absolute right-4 top-4 rounded-full bg-slate-900/80 px-3 py-1 text-xs font-semibold text-sky-100 ring-1 ring-sky-400/40">
-              {formatUsd(lastCandle.close)} · {formatTime(lastCandle.timestamp)}
+              {formatUsd(latestPoint.equity)} · {formatTime(latestPoint.timestamp)}
             </div>
           )}
         </div>
