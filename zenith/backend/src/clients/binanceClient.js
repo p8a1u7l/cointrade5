@@ -153,6 +153,24 @@ export class BinanceClient {
     return cache.bySymbol.get(symbol.toUpperCase()) ?? null;
   }
 
+  async isSymbolTradable(symbol, quoteAssets = undefined) {
+    if (!symbol) {
+      return false;
+    }
+
+    const cache = await this.loadExchangeInfo();
+    const meta = cache.bySymbol.get(symbol.toUpperCase());
+    if (!meta) {
+      return false;
+    }
+
+    const quoteFilter = Array.isArray(quoteAssets) && quoteAssets.length > 0
+      ? new Set(quoteAssets.map((asset) => asset.toUpperCase()))
+      : undefined;
+
+    return this._isTradablePerpetual(meta, quoteFilter);
+  }
+
   _isTradablePerpetual(meta, quoteFilter) {
     if (!meta) return false;
     if (meta.status !== 'TRADING') return false;
@@ -753,10 +771,15 @@ export class BinanceClient {
         }
       }
 
-      const changeScore = Math.abs(priceChangePercent);
-      const volatilityScore = rangePct * 0.6 + changeScore * 0.4;
+      const changeMagnitude = Math.abs(priceChangePercent);
+      const volatilityScore = rangePct * 0.55 + changeMagnitude * 0.45;
+      const spikeScore = changeMagnitude >= 12
+        ? changeMagnitude ** 1.08
+        : changeMagnitude ** 1.02;
+      const imbalanceScore = Math.max(rangePct - changeMagnitude * 0.35, 0);
       const volumeBoost = 1 + Math.log10(Math.max(quoteVolume, 1) + 10) / 8;
-      const score = volatilityScore * volumeBoost;
+      const directionBias = priceChangePercent >= 0 ? 1.05 : 0.97;
+      const score = (volatilityScore + spikeScore + imbalanceScore) * volumeBoost * directionBias;
 
       ranked.push({
         symbol,
@@ -766,6 +789,7 @@ export class BinanceClient {
         quoteVolume,
         baseVolume,
         volatilityPct: rangePct,
+        spikeScore,
         score,
         direction: priceChangePercent >= 0 ? 'up' : 'down',
       });

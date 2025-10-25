@@ -101,6 +101,7 @@ export class TradingEngine extends TypedEventEmitter {
     this.aiCooldownMs = 45_000;
     this.aiRevalidationMs = 240_000;
     this.baseSymbolsValidated = false;
+    this.blockedSymbols = new Set();
 
     this.stream.on('tick', (tick) => {
       this.latestTicks.set(tick.symbol, tick);
@@ -122,6 +123,37 @@ export class TradingEngine extends TypedEventEmitter {
 
   invalidateBalanceCache() {
     this.balanceCache = { timestamp: 0, available: 0 };
+  }
+
+  blockSymbol(symbol) {
+    if (!symbol) {
+      return false;
+    }
+
+    const key = symbol.toUpperCase();
+    if (this.blockedSymbols.has(key)) {
+      return false;
+    }
+
+    this.blockedSymbols.add(key);
+
+    const filteredBase = this.baseSymbols.filter((entry) => entry !== key);
+    if (filteredBase.length !== this.baseSymbols.length) {
+      this.baseSymbols = filteredBase;
+      this.baseSymbolsValidated = false;
+    }
+
+    const filteredActive = this.activeSymbols.filter((entry) => entry !== key);
+    if (filteredActive.length !== this.activeSymbols.length) {
+      this._updateActiveSymbols(filteredActive);
+    }
+
+    if (Array.isArray(this.cachedTopMovers) && this.cachedTopMovers.length > 0) {
+      this.cachedTopMovers = this.cachedTopMovers.filter((item) => item.symbol !== key);
+    }
+
+    logger.warn({ symbol: key }, 'Blocked non-tradable symbol from trading universe');
+    return true;
   }
 
   async getPosition(symbol, options = {}) {
@@ -191,9 +223,24 @@ export class TradingEngine extends TypedEventEmitter {
   async refreshSymbolUniverse(options = {}) {
     const discovery = config.binance.symbolDiscovery ?? {};
     const enabled = discovery.enabled !== false;
+
+    if (this.blockedSymbols.size > 0) {
+      const filteredBase = this.baseSymbols.filter((symbol) => !this.blockedSymbols.has(symbol));
+      if (filteredBase.length !== this.baseSymbols.length) {
+        this.baseSymbols = filteredBase;
+        this.baseSymbolsValidated = false;
+      }
+
+      const filteredActive = this.activeSymbols.filter((symbol) => !this.blockedSymbols.has(symbol));
+      if (filteredActive.length !== this.activeSymbols.length) {
+        this._updateActiveSymbols(filteredActive);
+      }
+    }
+
     if (!this.baseSymbolsValidated) {
       try {
-        const validated = await this.binance.filterTradableSymbols(this.baseSymbols, discovery.quoteAssets);
+        const baseCandidates = this.baseSymbols.filter((symbol) => !this.blockedSymbols.has(symbol));
+        const validated = await this.binance.filterTradableSymbols(baseCandidates, discovery.quoteAssets);
         if (validated.length > 0) {
           this.baseSymbols = validated;
           this.activeSymbols = [...validated];
@@ -231,9 +278,10 @@ export class TradingEngine extends TypedEventEmitter {
       this.lastSymbolRefresh = now;
 
       const baseSet = new Set(this.baseSymbols);
+      const blocked = this.blockedSymbols;
       const dynamicCandidates = movers
         .map((item) => item.symbol)
-        .filter((symbol) => !baseSet.has(symbol));
+        .filter((symbol) => !baseSet.has(symbol) && !blocked.has(symbol));
       const routeLimit = Math.max(Number(discovery.routeLimit ?? 0) || 0, 10);
       const dynamicQuota = Math.min(
         dynamicCandidates.length,
@@ -245,6 +293,7 @@ export class TradingEngine extends TypedEventEmitter {
       const addBaseSymbol = (symbol) => {
         if (!symbol) return;
         if (!this.baseSymbols.includes(symbol)) return;
+        if (blocked.has(symbol)) return;
         if (!trimmedBase.includes(symbol)) {
           trimmedBase.push(symbol);
         }
@@ -264,6 +313,18 @@ export class TradingEngine extends TypedEventEmitter {
         nextSymbols.length = configuredMax;
       }
       const tradable = await this.binance.filterTradableSymbols(nextSymbols, discovery.quoteAssets);
+      const tradableSet = new Set(tradable);
+      const suspectSymbols = nextSymbols.filter((symbol) => !tradableSet.has(symbol));
+      for (const suspectSymbol of suspectSymbols) {
+        try {
+          const stillTradable = await this.binance.isSymbolTradable(suspectSymbol, discovery.quoteAssets);
+          if (!stillTradable) {
+            this.blockSymbol(suspectSymbol);
+          }
+        } catch (error) {
+          logger.debug({ error, symbol: suspectSymbol }, 'Unable to validate candidate symbol during refresh');
+        }
+      }
       if (tradable.length === 0) {
         logger.warn('Binance symbol scan returned no tradable instruments, falling back to base set');
       }
@@ -292,7 +353,10 @@ export class TradingEngine extends TypedEventEmitter {
   }
 
   _updateActiveSymbols(nextSymbols) {
-    const unique = Array.from(new Set((nextSymbols ?? []).map((symbol) => symbol.toUpperCase())));
+    const blocked = this.blockedSymbols;
+    const unique = Array.from(new Set((nextSymbols ?? []).map((symbol) => symbol.toUpperCase()))).filter(
+      (symbol) => !blocked.has(symbol)
+    );
     const changed =
       unique.length !== this.activeSymbols.length ||
       unique.some((symbol, index) => symbol !== this.activeSymbols[index]);
@@ -448,6 +512,19 @@ export class TradingEngine extends TypedEventEmitter {
   }
 
   async evaluateSymbol(symbol) {
+    let tradable = false;
+    try {
+      tradable = await this.binance.isSymbolTradable(symbol, config.binance.symbolDiscovery?.quoteAssets);
+    } catch (error) {
+      logger.error({ error, symbol }, 'Unable to validate Binance symbol before evaluation');
+      return null;
+    }
+
+    if (!tradable) {
+      this.blockSymbol(symbol);
+      return null;
+    }
+
     const tick = this.latestTicks.get(symbol);
     let snapshot;
     try {
@@ -968,7 +1045,22 @@ export class TradingEngine extends TypedEventEmitter {
       return;
     }
 
-    const result = await this.binance.placeMarketOrder(decision.symbol, orderSide, quantity, {
+    const tick = this.latestTicks.get(decision.symbol);
+    const referencePrice = Number.isFinite(decision.referencePrice)
+      ? decision.referencePrice
+      : Number.isFinite(tick?.price)
+      ? tick.price
+      : undefined;
+
+    const normalized = await this.binance.ensureTradableQuantity(decision.symbol, quantity, referencePrice);
+    let exitQuantity = normalized?.quantity ?? quantity;
+    if (!Number.isFinite(exitQuantity) || exitQuantity <= 0) {
+      logger.warn({ decision, position, normalized }, 'Unable to normalize exit quantity, skipping close');
+      return;
+    }
+
+    const quantityParam = normalized?.quantityText ?? Number(exitQuantity.toFixed(6));
+    const result = await this.binance.placeMarketOrder(decision.symbol, orderSide, quantityParam, {
       responseType: 'RESULT',
       reduceOnly: true,
     });
