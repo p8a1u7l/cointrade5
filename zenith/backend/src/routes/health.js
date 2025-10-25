@@ -8,6 +8,8 @@ export function createHealthRouter(engine) {
       status: 'ok',
       running: engine.isRunning(),
       riskLevel: engine.getRiskLevel(),
+      leverage: engine.getUserLeverage(),
+      allocationPct: engine.getAllocationPercent(),
     });
   });
 

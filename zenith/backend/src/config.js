@@ -19,6 +19,11 @@ const parseNumber = (value, fallback) => {
   return numeric;
 };
 
+const clamp = (value, min, max) => {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(value, min), max);
+};
+
 const parseSymbols = (value) => {
   const raw = value && value.trim().length > 0 ? value : 'BTCUSDT,ETHUSDT';
   return raw
@@ -60,6 +65,40 @@ export const config = {
     initialBalance: parseNumber(process.env.INITIAL_BALANCE, 100_000),
     loopIntervalSeconds: parseNumber(process.env.LOOP_INTERVAL_SECONDS, 30),
     maxPositionLeverage: parseNumber(process.env.MAX_POSITION_LEVERAGE, 5),
+    userControls: (() => {
+      const minLeverage = clamp(parseNumber(process.env.USER_CONTROL_MIN_LEVERAGE, 1), 1, 50);
+      const maxLeverage = clamp(
+        parseNumber(process.env.USER_CONTROL_MAX_LEVERAGE, 50),
+        minLeverage,
+        50
+      );
+      const defaultLeverage = clamp(
+        parseNumber(process.env.USER_CONTROL_DEFAULT_LEVERAGE, 3),
+        minLeverage,
+        maxLeverage
+      );
+
+      const minAllocation = clamp(parseNumber(process.env.USER_CONTROL_MIN_ALLOCATION_PCT, 1), 1, 100);
+      const maxAllocation = clamp(
+        parseNumber(process.env.USER_CONTROL_MAX_ALLOCATION_PCT, 50),
+        minAllocation,
+        100
+      );
+      const defaultAllocation = clamp(
+        parseNumber(process.env.USER_CONTROL_DEFAULT_ALLOCATION_PCT, 10),
+        minAllocation,
+        maxAllocation
+      );
+
+      return {
+        minLeverage,
+        maxLeverage,
+        defaultLeverage,
+        minAllocationPct: minAllocation,
+        maxAllocationPct: maxAllocation,
+        defaultAllocationPct: defaultAllocation,
+      };
+    })(),
   },
   logging: {
     level: process.env.LOG_LEVEL ?? 'info',

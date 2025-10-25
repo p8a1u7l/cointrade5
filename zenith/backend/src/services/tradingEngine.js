@@ -8,14 +8,6 @@ import { TypedEventEmitter } from '../utils/eventEmitter.js';
 import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
 
-const RISK_LEVERAGE = {
-  1: 1,
-  2: 2,
-  3: 3,
-  4: 4,
-  5: config.trading.maxPositionLeverage,
-};
-
 const BASE_ORDER_NOTIONAL = 40;
 const DEFAULT_CONFIDENCE_GUESS = 0.75;
 const MARGIN_USAGE_BUFFER = 0.9;
@@ -29,6 +21,11 @@ const POSITION_EPSILON = 1e-8;
 const toNumber = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
+};
+
+const clamp = (value, min, max) => {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(value, min), max);
 };
 
 function computeContextShift(previous, next) {
@@ -81,6 +78,16 @@ export class TradingEngine extends TypedEventEmitter {
     this.cachedTopMovers = [];
     this.lastSymbolRefresh = 0;
     this.riskLevel = 3;
+    this.leverageRange = {
+      min: config.trading.userControls.minLeverage,
+      max: config.trading.userControls.maxLeverage,
+    };
+    this.allocationRange = {
+      min: config.trading.userControls.minAllocationPct,
+      max: config.trading.userControls.maxAllocationPct,
+    };
+    this.userLeverage = config.trading.userControls.defaultLeverage;
+    this.allocationPercent = config.trading.userControls.defaultAllocationPct;
     this.running = false;
     this.loopTimer = undefined;
     this.binance = new BinanceClient();
@@ -316,6 +323,14 @@ export class TradingEngine extends TypedEventEmitter {
     return this.riskLevel;
   }
 
+  getUserLeverage() {
+    return this.userLeverage;
+  }
+
+  getAllocationPercent() {
+    return this.allocationPercent;
+  }
+
   isRunning() {
     return this.running;
   }
@@ -324,6 +339,34 @@ export class TradingEngine extends TypedEventEmitter {
     if (this.riskLevel === level) return;
     this.riskLevel = level;
     this.emit('riskChanged', level);
+  }
+
+  setUserLeverage(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      throw new Error('Leverage must be numeric');
+    }
+    const clamped = clamp(numeric, this.leverageRange.min, this.leverageRange.max);
+    if (this.userLeverage === clamped) {
+      return this.userLeverage;
+    }
+    this.userLeverage = clamped;
+    this.emit('leverageChanged', clamped);
+    return this.userLeverage;
+  }
+
+  setAllocationPercent(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      throw new Error('Allocation percent must be numeric');
+    }
+    const clamped = clamp(numeric, this.allocationRange.min, this.allocationRange.max);
+    if (this.allocationPercent === clamped) {
+      return this.allocationPercent;
+    }
+    this.allocationPercent = clamped;
+    this.emit('allocationChanged', clamped);
+    return this.allocationPercent;
   }
 
   async start() {
@@ -421,7 +464,10 @@ export class TradingEngine extends TypedEventEmitter {
           ...rest,
           reasoning: `${rest.reasoning} · Snapshot unavailable, maintaining prior stance`,
         };
-        await this.recorder.recordStrategy(fallback, this.riskLevel);
+        await this.recorder.recordStrategy(fallback, this.riskLevel, {
+          leverage: this.getUserLeverage(),
+          allocationPct: this.getAllocationPercent(),
+        });
         return fallback;
       }
       throw error;
@@ -438,7 +484,10 @@ export class TradingEngine extends TypedEventEmitter {
 
     const position = await this.getPosition(symbol);
     const decision = await this.resolveDecision(symbol, snapshot, tick, contextSnapshot, position);
-    await this.recorder.recordStrategy(decision, this.riskLevel);
+    await this.recorder.recordStrategy(decision, this.riskLevel, {
+      leverage: this.getUserLeverage(),
+      allocationPct: this.getAllocationPercent(),
+    });
     return decision;
   }
 
@@ -711,11 +760,16 @@ export class TradingEngine extends TypedEventEmitter {
       return reused;
     }
 
-    const leveragePreset = RISK_LEVERAGE[this.riskLevel] ?? 1;
-    const estimatedNotional = BASE_ORDER_NOTIONAL * Math.max(leveragePreset, 1) * DEFAULT_CONFIDENCE_GUESS;
+    const leveragePreset = this.getUserLeverage();
+    const estimatedNotional = this.estimateTargetNotional(
+      leveragePreset,
+      DEFAULT_CONFIDENCE_GUESS,
+      this.getCachedAvailableMargin()
+    );
     const llmDecision = await requestStrategy(symbol, contextForAi, {
       riskLevel: this.riskLevel,
       leverage: leveragePreset,
+      allocationPercent: this.getAllocationPercent(),
       estimatedNotional,
     });
     const enhanced = {
@@ -803,7 +857,7 @@ export class TradingEngine extends TypedEventEmitter {
       return;
     }
 
-    const leverage = RISK_LEVERAGE[this.riskLevel];
+    const leverage = this.getUserLeverage();
     const side = decision.bias === 'long' ? 'BUY' : 'SELL';
     const confidence = Number(decision.confidence ?? 0);
 
@@ -815,7 +869,14 @@ export class TradingEngine extends TypedEventEmitter {
       }
     }
 
-    const rawQuantity = this.calculateOrderSize(decision.symbol, leverage, confidence, referencePrice);
+    const availableMargin = await this.getAvailableMargin();
+    const rawQuantity = this.calculateOrderSize(
+      decision.symbol,
+      leverage,
+      confidence,
+      referencePrice,
+      availableMargin
+    );
     let normalized = await this.binance.ensureTradableQuantity(decision.symbol, rawQuantity, referencePrice);
     let quantity = normalized?.quantity ?? 0;
 
@@ -824,7 +885,14 @@ export class TradingEngine extends TypedEventEmitter {
       return;
     }
 
-    const marginCheck = await this.enforceMarginLimit(decision.symbol, leverage, referencePrice, normalized, rawQuantity);
+    const marginCheck = await this.enforceMarginLimit(
+      decision.symbol,
+      leverage,
+      referencePrice,
+      normalized,
+      rawQuantity,
+      availableMargin
+    );
     if (!marginCheck.allowed) {
       logger.warn({ decision, referencePrice, rawQuantity, normalized }, 'Skipping execution due to margin constraints');
       return;
@@ -915,9 +983,12 @@ export class TradingEngine extends TypedEventEmitter {
     logger.info({ decision, result }, 'Closed position via strategy exit');
   }
 
-  calculateOrderSize(symbol, leverage, confidence, referencePrice) {
-    const safeConfidence = Number.isFinite(confidence) ? Math.max(confidence, 0.1) : 0.1;
-    const targetNotional = BASE_ORDER_NOTIONAL * Math.max(leverage, 1) * safeConfidence;
+  calculateOrderSize(symbol, leverage, confidence, referencePrice, availableOverride) {
+    const targetNotional = this.estimateTargetNotional(
+      leverage,
+      confidence,
+      availableOverride
+    );
     if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
       const fallbackQty = Number((targetNotional / 1000).toFixed(6));
       logger.debug({ symbol, fallbackQty }, 'Calculated fallback order size without reference price');
@@ -928,7 +999,7 @@ export class TradingEngine extends TypedEventEmitter {
     return Number(quantity.toFixed(6));
   }
 
-  async enforceMarginLimit(symbol, leverage, referencePrice, normalized, rawQuantity) {
+  async enforceMarginLimit(symbol, leverage, referencePrice, normalized, rawQuantity, availableOverride) {
     const quantity = normalized?.quantity ?? 0;
     if (!Number.isFinite(quantity) || quantity <= 0) {
       return { allowed: false, normalized };
@@ -938,7 +1009,9 @@ export class TradingEngine extends TypedEventEmitter {
       return { allowed: true, normalized };
     }
 
-    const available = await this.getAvailableMargin();
+    const available = Number.isFinite(availableOverride)
+      ? availableOverride
+      : await this.getAvailableMargin();
     if (!Number.isFinite(available) || available <= 0) {
       logger.warn({ symbol }, 'Insufficient available margin to open new position');
       return { allowed: false, normalized };
@@ -982,6 +1055,28 @@ export class TradingEngine extends TypedEventEmitter {
     }, 'Reduced order size to respect available margin');
 
     return { allowed: true, normalized: adjusted };
+  }
+
+  getCachedAvailableMargin(ttl = 3_000) {
+    const now = Date.now();
+    if (now - this.balanceCache.timestamp <= ttl && Number.isFinite(this.balanceCache.available)) {
+      return this.balanceCache.available;
+    }
+    return undefined;
+  }
+
+  estimateTargetNotional(leverage, confidence, availableOverride) {
+    const safeLeverage = Math.max(Number(leverage) || 1, 1);
+    const safeConfidence = Number.isFinite(confidence) ? Math.max(confidence, 0.1) : 0.1;
+    const allocationFraction = clamp(this.getAllocationPercent() / 100, 0.01, 1);
+    const available = Number.isFinite(availableOverride)
+      ? availableOverride
+      : this.getCachedAvailableMargin();
+    const baseCapitalSource = Number.isFinite(available) && available > 0
+      ? available
+      : config.trading.initialBalance;
+    const capitalBase = Math.max(baseCapitalSource * allocationFraction, BASE_ORDER_NOTIONAL);
+    return capitalBase * safeLeverage * safeConfidence;
   }
 
   hasStrongConviction(decision) {

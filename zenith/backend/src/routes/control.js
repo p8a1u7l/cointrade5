@@ -22,11 +22,50 @@ export function createControlRouter(engine) {
       return;
     }
     engine.setRiskLevel(level);
-    res.status(200).json({ riskLevel: level });
+    res.status(200).json({
+      riskLevel: level,
+      leverage: engine.getUserLeverage(),
+      allocationPct: engine.getAllocationPercent(),
+    });
+  });
+
+  router.post('/leverage/:value', (req, res) => {
+    const value = Number(req.params.value);
+    if (!Number.isFinite(value)) {
+      res.status(400).json({ error: 'Leverage must be numeric' });
+      return;
+    }
+    try {
+      const leverage = engine.setUserLeverage(value);
+      res.status(200).json({ leverage, allocationPct: engine.getAllocationPercent() });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'Failed to set leverage' });
+    }
+  });
+
+  router.post('/allocation/:percent', (req, res) => {
+    const value = Number(req.params.percent);
+    if (!Number.isFinite(value)) {
+      res.status(400).json({ error: 'Allocation percent must be numeric' });
+      return;
+    }
+    try {
+      const allocationPct = engine.setAllocationPercent(value);
+      res.status(200).json({ allocationPct, leverage: engine.getUserLeverage() });
+    } catch (error) {
+      res
+        .status(400)
+        .json({ error: error instanceof Error ? error.message : 'Failed to set allocation percent' });
+    }
   });
 
   router.get('/state', (_req, res) => {
-    res.json({ running: engine.isRunning(), riskLevel: engine.getRiskLevel() });
+    res.json({
+      running: engine.isRunning(),
+      riskLevel: engine.getRiskLevel(),
+      leverage: engine.getUserLeverage(),
+      allocationPct: engine.getAllocationPercent(),
+    });
   });
 
   return router;

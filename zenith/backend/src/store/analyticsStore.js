@@ -79,6 +79,8 @@ export class AnalyticsStore {
       bias: decision.bias,
       confidence: decision.confidence,
       risk_level: riskLevel,
+      leverage: Number.isFinite(options.leverage) ? Number(options.leverage) : undefined,
+      allocation_pct: Number.isFinite(options.allocationPct) ? Number(options.allocationPct) : undefined,
     };
     this.signals.push(record);
     if (this.signals.length > this.maxEntries) {

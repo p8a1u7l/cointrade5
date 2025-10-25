@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Area as RechartsArea,
   AreaChart as RechartsAreaChart,
@@ -9,7 +9,7 @@ import {
   YAxis as RechartsYAxis,
 } from 'recharts';
 
-type AnyComponent = (props: any) => JSX.Element | null;
+type AnyComponent = (props: any) => ReactNode;
 
 const AreaChart = RechartsAreaChart as unknown as AnyComponent;
 const Area = RechartsArea as unknown as AnyComponent;

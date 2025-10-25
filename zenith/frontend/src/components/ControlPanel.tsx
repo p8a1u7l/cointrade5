@@ -6,6 +6,10 @@ interface Props {
   onRiskChange: (level: number) => void;
   running: boolean;
   signalsEndpoint: string;
+  leverage: number;
+  allocationPct: number;
+  onLeverageChange: (value: number) => void;
+  onAllocationChange: (value: number) => void;
 }
 
 interface SignalRow {
@@ -16,6 +20,9 @@ interface SignalRow {
   risk_level: number;
 }
 
+type RangeChangeEvent = { target: { value: string } };
+type RangeKeyboardEvent = { key: string };
+
 const riskLabels = {
   1: 'Capital preservation',
   2: 'Cautious',
@@ -24,8 +31,19 @@ const riskLabels = {
   5: 'High octane',
 };
 
-export function ControlPanel({ riskLevel, onRiskChange, running, signalsEndpoint }: Props) {
+export function ControlPanel({
+  riskLevel,
+  onRiskChange,
+  running,
+  signalsEndpoint,
+  leverage,
+  allocationPct,
+  onLeverageChange,
+  onAllocationChange,
+}: Props) {
   const [signals, setSignals] = useState<SignalRow[]>([]);
+  const [pendingLeverage, setPendingLeverage] = useState(leverage);
+  const [pendingAllocation, setPendingAllocation] = useState(allocationPct);
 
   useEffect(() => {
     if (!signalsEndpoint) return;
@@ -52,6 +70,28 @@ export function ControlPanel({ riskLevel, onRiskChange, running, signalsEndpoint
       clearInterval(interval);
     };
   }, [signalsEndpoint]);
+
+  useEffect(() => {
+    setPendingLeverage(leverage);
+  }, [leverage]);
+
+  useEffect(() => {
+    setPendingAllocation(allocationPct);
+  }, [allocationPct]);
+
+  const commitLeverage = () => {
+    const rounded = Math.round(pendingLeverage);
+    if (rounded !== Math.round(leverage)) {
+      onLeverageChange(rounded);
+    }
+  };
+
+  const commitAllocation = () => {
+    const rounded = Math.round(pendingAllocation);
+    if (rounded !== Math.round(allocationPct)) {
+      onAllocationChange(rounded);
+    }
+  };
 
   return (
     <div className="space-y-8 rounded-3xl border border-white/10 bg-white/5 p-6 shadow-[0_35px_120px_-65px_rgba(59,130,246,0.7)] backdrop-blur">
@@ -90,6 +130,60 @@ export function ControlPanel({ riskLevel, onRiskChange, running, signalsEndpoint
       <div className="rounded-2xl border border-white/10 bg-slate-950/50 px-5 py-4">
         <div className="text-sm font-medium text-white">{riskLabels[riskLevel as keyof typeof riskLabels]}</div>
         <div className="mt-1 text-sm text-slate-300/90">Engine cadence aligns leverage and order sizing with this profile.</div>
+      </div>
+
+      <div className="space-y-6 rounded-2xl border border-white/10 bg-slate-950/50 px-5 py-4">
+        <div>
+          <div className="flex items-center justify-between text-sm font-medium text-white">
+            <span>Leverage multiplier</span>
+            <span className="rounded-full border border-emerald-300/40 bg-emerald-400/10 px-2 py-0.5 text-xs text-emerald-200">
+              x{Math.round(pendingLeverage)}
+            </span>
+          </div>
+          <input
+            className="mt-3 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-800/80 accent-emerald-400"
+            type="range"
+            min={1}
+            max={50}
+            step={1}
+            value={pendingLeverage}
+            onChange={(event: RangeChangeEvent) => setPendingLeverage(Number(event.target.value))}
+            onPointerUp={commitLeverage}
+            onKeyUp={(event: RangeKeyboardEvent) => {
+              if (['Enter', ' ', 'Spacebar', 'ArrowLeft', 'ArrowRight'].includes(event.key)) commitLeverage();
+            }}
+          />
+          <p className="mt-2 text-xs text-slate-400/90">
+            GPT execution defaults to GPT-mini and escalates only on high-risk runs. Use leverage judiciously when capital is at
+            stake.
+          </p>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between text-sm font-medium text-white">
+            <span>Allocation per trade</span>
+            <span className="rounded-full border border-cyan-300/40 bg-cyan-400/10 px-2 py-0.5 text-xs text-cyan-200">
+              {Math.round(pendingAllocation)}%
+            </span>
+          </div>
+          <input
+            className="mt-3 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-800/80 accent-cyan-400"
+            type="range"
+            min={1}
+            max={100}
+            step={1}
+            value={pendingAllocation}
+            onChange={(event: RangeChangeEvent) => setPendingAllocation(Number(event.target.value))}
+            onPointerUp={commitAllocation}
+            onKeyUp={(event: RangeKeyboardEvent) => {
+              if (['Enter', ' ', 'Spacebar', 'ArrowLeft', 'ArrowRight'].includes(event.key)) commitAllocation();
+            }}
+          />
+          <p className="mt-2 text-xs text-slate-400/90">
+            Set how much available margin GPT can deploy per trade. The engine still enforces Binance filters and margin guard
+            rails.
+          </p>
+        </div>
       </div>
 
       <div>

@@ -730,9 +730,26 @@ export class BinanceClient {
         continue;
       }
 
-      const absChange = Math.abs(priceChangePercent);
-      const liquidityBoost = Math.log10(Math.max(quoteVolume, 1) + 10);
-      const score = absChange * liquidityBoost;
+      const highPrice = Number(entry.highPrice ?? entry.high ?? 0);
+      const lowPrice = Number(entry.lowPrice ?? entry.low ?? 0);
+      let rangePct = 0;
+      if (
+        Number.isFinite(highPrice) &&
+        Number.isFinite(lowPrice) &&
+        highPrice > 0 &&
+        lowPrice > 0 &&
+        highPrice > lowPrice
+      ) {
+        const midpoint = (highPrice + lowPrice) / 2;
+        if (midpoint > 0) {
+          rangePct = ((highPrice - lowPrice) / midpoint) * 100;
+        }
+      }
+
+      const changeScore = Math.abs(priceChangePercent);
+      const volatilityScore = rangePct * 0.6 + changeScore * 0.4;
+      const volumeBoost = 1 + Math.log10(Math.max(quoteVolume, 1) + 10) / 8;
+      const score = volatilityScore * volumeBoost;
 
       ranked.push({
         symbol,
@@ -741,6 +758,7 @@ export class BinanceClient {
         lastPrice,
         quoteVolume,
         baseVolume,
+        volatilityPct: rangePct,
         score,
         direction: priceChangePercent >= 0 ? 'up' : 'down',
       });

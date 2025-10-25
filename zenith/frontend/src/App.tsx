@@ -14,6 +14,8 @@ interface MetricsPayload {
   realized: number;
   unrealized?: number;
   riskLevel: number;
+  leverage?: number;
+  allocationPct?: number;
   winRate?: number;
   wins?: number;
   losses?: number;
@@ -44,6 +46,8 @@ interface MetricsPayload {
 interface HealthPayload {
   running: boolean;
   riskLevel: number;
+  leverage?: number;
+  allocationPct?: number;
 }
 
 export default function App() {
@@ -52,6 +56,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [riskLevel, setRiskLevel] = useState(3);
+  const [leverage, setLeverage] = useState(3);
+  const [allocationPct, setAllocationPct] = useState(10);
   const openAiUsage = metrics?.openAi;
   const totalCalls = openAiUsage?.calls ?? 0;
   const primaryModel = openAiUsage?.byModel && openAiUsage.byModel.length > 0 ? openAiUsage.byModel[0] : null;
@@ -100,6 +106,12 @@ export default function App() {
       if (typeof payload.riskLevel === 'number') {
         setRiskLevel(payload.riskLevel);
       }
+      if (typeof payload.leverage === 'number') {
+        setLeverage(payload.leverage);
+      }
+      if (typeof payload.allocationPct === 'number') {
+        setAllocationPct(payload.allocationPct);
+      }
       setError(null);
       setLoading(false);
     } catch (err) {
@@ -117,6 +129,12 @@ export default function App() {
       if (typeof payload.riskLevel === 'number') {
         setRiskLevel(payload.riskLevel);
       }
+      if (typeof payload.leverage === 'number') {
+        setLeverage(payload.leverage);
+      }
+      if (typeof payload.allocationPct === 'number') {
+        setAllocationPct(payload.allocationPct);
+      }
     } catch (err) {
       console.error('Failed to refresh engine health', err);
     }
@@ -128,7 +146,52 @@ export default function App() {
         method: 'POST',
       });
       if (!response.ok) throw new Error('Failed to set risk');
-      setRiskLevel(level);
+      const payload = (await response.json()) as {
+        riskLevel: number;
+        leverage?: number;
+        allocationPct?: number;
+      };
+      setRiskLevel(payload.riskLevel ?? level);
+      if (typeof payload.leverage === 'number') {
+        setLeverage(payload.leverage);
+      }
+      if (typeof payload.allocationPct === 'number') {
+        setAllocationPct(payload.allocationPct);
+      }
+      await refreshMetrics();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  async function updateLeverage(value: number) {
+    try {
+      const response = await fetch(`${dashboardConfig.apiBaseUrl}/control/leverage/${value}`, {
+        method: 'POST',
+      });
+      if (!response.ok) throw new Error('Failed to set leverage');
+      const payload = (await response.json()) as { leverage: number; allocationPct?: number };
+      setLeverage(payload.leverage ?? value);
+      if (typeof payload.allocationPct === 'number') {
+        setAllocationPct(payload.allocationPct);
+      }
+      await refreshMetrics();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  async function updateAllocation(value: number) {
+    try {
+      const response = await fetch(`${dashboardConfig.apiBaseUrl}/control/allocation/${value}`, {
+        method: 'POST',
+      });
+      if (!response.ok) throw new Error('Failed to set allocation');
+      const payload = (await response.json()) as { allocationPct: number; leverage?: number };
+      setAllocationPct(payload.allocationPct ?? value);
+      if (typeof payload.leverage === 'number') {
+        setLeverage(payload.leverage);
+      }
       await refreshMetrics();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -175,6 +238,14 @@ export default function App() {
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200">
               <span className="text-xs uppercase tracking-[0.35em] text-slate-400/80">Risk</span>
               <span className="text-base font-semibold text-white">{riskLevel}</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200">
+              <span className="text-xs uppercase tracking-[0.35em] text-slate-400/80">Lev</span>
+              <span className="text-base font-semibold text-white">x{leverage}</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200">
+              <span className="text-xs uppercase tracking-[0.35em] text-slate-400/80">Alloc</span>
+              <span className="text-base font-semibold text-white">{allocationPct}%</span>
             </div>
             <div className="flex gap-3">
               <button
@@ -271,7 +342,11 @@ export default function App() {
               riskLevel={riskLevel}
               onRiskChange={updateRisk}
               running={running}
-              signalsEndpoint={dashboardConfig.signalsEndpoint}
+              signalsEndpoint={dashboardConfig.signalsEndpoint ?? `${dashboardConfig.apiBaseUrl}/signals`}
+              leverage={leverage}
+              allocationPct={allocationPct}
+              onLeverageChange={updateLeverage}
+              onAllocationChange={updateAllocation}
             />
 
             {dashboardConfig.moversEndpoint && (
