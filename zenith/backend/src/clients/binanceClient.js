@@ -660,19 +660,26 @@ export class BinanceClient {
     }
   }
 
-  async placeMarketOrder(symbol, side, quantity) {
+  async placeMarketOrder(symbol, side, quantity, options = {}) {
     try {
-      const data = await this.request('POST', '/fapi/v1/order', {
+      const payload = {
         symbol,
         side,
         type: 'MARKET',
         quantity,
-      });
+        newOrderRespType: options.responseType ?? 'RESULT',
+      };
+
+      if (options.reduceOnly === true) {
+        payload.reduceOnly = true;
+      }
+
+      const data = await this.request('POST', '/fapi/v1/order', payload);
       return {
         orderId: String(data.orderId),
         status: data.status,
         avgPrice: Number(data.avgPrice ?? data.price ?? 0),
-        executedQty: Number(data.executedQty ?? data.origQty ?? 0),
+        executedQty: Number(data.executedQty ?? data.cumQty ?? data.origQty ?? 0),
       };
     } catch (error) {
       logger.error({ error, symbol, side, quantity }, 'Failed to execute Binance market order');

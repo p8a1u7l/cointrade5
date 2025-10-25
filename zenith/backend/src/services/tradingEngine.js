@@ -916,7 +916,9 @@ export class TradingEngine extends TypedEventEmitter {
     const quantityParam = normalized?.quantityText ?? quantity;
     let result;
     try {
-      result = await this.binance.placeMarketOrder(decision.symbol, side, quantityParam);
+      result = await this.binance.placeMarketOrder(decision.symbol, side, quantityParam, {
+        responseType: 'RESULT',
+      });
     } catch (error) {
       this.invalidateBalanceCache();
       if (error instanceof Error && /margin is insufficient/i.test(error.message)) {
@@ -933,7 +935,10 @@ export class TradingEngine extends TypedEventEmitter {
         filledQty: result.executedQty,
         avgPrice: result.avgPrice,
       },
-      decision
+      {
+        ...decision,
+        referencePrice,
+      }
     );
     this.invalidatePositionCache();
     this.invalidateBalanceCache();
@@ -963,11 +968,26 @@ export class TradingEngine extends TypedEventEmitter {
       return;
     }
 
-    const result = await this.binance.placeMarketOrder(decision.symbol, orderSide, quantity);
+    const result = await this.binance.placeMarketOrder(decision.symbol, orderSide, quantity, {
+      responseType: 'RESULT',
+      reduceOnly: true,
+    });
+    const exitEntryPrice = Number.isFinite(decision.entryPrice)
+      ? decision.entryPrice
+      : Number.isFinite(position.entryPrice)
+      ? position.entryPrice
+      : undefined;
     const recorderDecision = {
       ...decision,
       bias: orderSide === 'BUY' ? 'long' : 'short',
+      entryPrice: exitEntryPrice,
     };
+    const exitReferencePrice = Number.isFinite(decision.referencePrice)
+      ? decision.referencePrice
+      : Number.isFinite(position.entryPrice)
+      ? position.entryPrice
+      : undefined;
+
     await this.recorder.recordExecution(
       {
         symbol: decision.symbol,
@@ -976,7 +996,10 @@ export class TradingEngine extends TypedEventEmitter {
         filledQty: result.executedQty,
         avgPrice: result.avgPrice,
       },
-      recorderDecision
+      {
+        ...recorderDecision,
+        referencePrice: exitReferencePrice,
+      }
     );
     this.invalidatePositionCache();
     this.invalidateBalanceCache();

@@ -95,9 +95,12 @@ export class AnalyticsStore {
 
   addExecution(result, decision, options = {}) {
     const direction = decision.bias === 'long' ? 1 : decision.bias === 'short' ? -1 : 0;
-    if (direction === 0 || result.filledQty <= 0) return;
+    const filledQty = Number(result.filledQty ?? result.executedQty ?? result.quantity ?? 0);
+    if (direction === 0 || !Number.isFinite(filledQty) || filledQty <= 0) {
+      return;
+    }
 
-    const signedQty = result.filledQty * direction;
+    const signedQty = filledQty * direction;
     const now = new Date().toISOString();
     const existing =
       this.symbolStats.get(decision.symbol) ?? {
@@ -111,6 +114,39 @@ export class AnalyticsStore {
         trades: 0,
         lastUpdated: now,
       };
+
+    const resolvedFillPrice = (() => {
+      const candidates = [
+        result.avgPrice,
+        result.price,
+        decision.fillPrice,
+        decision.entryPrice,
+        decision.referencePrice,
+      ];
+      for (const candidate of candidates) {
+        const numeric = Number(candidate);
+        if (Number.isFinite(numeric) && numeric > 0) {
+          return numeric;
+        }
+      }
+      return 0;
+    })();
+
+    const effectiveFillPrice = (() => {
+      const candidates = [
+        resolvedFillPrice,
+        existing.avgEntryPrice,
+        decision.entryPrice,
+        decision.referencePrice,
+      ];
+      for (const candidate of candidates) {
+        const numeric = Number(candidate);
+        if (Number.isFinite(numeric) && numeric > 0) {
+          return numeric;
+        }
+      }
+      return 0;
+    })();
 
     if (existing.wins === undefined) existing.wins = 0;
     if (existing.losses === undefined) existing.losses = 0;
@@ -127,14 +163,16 @@ export class AnalyticsStore {
     if (previousQty === 0 || Math.sign(previousQty) === Math.sign(signedQty)) {
       const combined = previousAbs + incomingAbs;
       existing.avgEntryPrice =
-        combined === 0 ? 0 : (existing.avgEntryPrice * previousAbs + result.avgPrice * incomingAbs) / combined;
+        combined === 0
+          ? 0
+          : (existing.avgEntryPrice * previousAbs + effectiveFillPrice * incomingAbs) / combined;
       existing.netContracts = previousQty + signedQty;
     } else {
       const closingQty = Math.min(previousAbs, incomingAbs);
       const pnlPerContract =
         Math.sign(previousQty) > 0
-          ? result.avgPrice - existing.avgEntryPrice
-          : existing.avgEntryPrice - result.avgPrice;
+          ? effectiveFillPrice - existing.avgEntryPrice
+          : existing.avgEntryPrice - effectiveFillPrice;
       const realized = closingQty * pnlPerContract;
       existing.realizedPnl += realized;
       if (closingQty > 0) {
@@ -156,7 +194,7 @@ export class AnalyticsStore {
         existing.netContracts = Math.sign(previousQty) * remainingFromExisting;
       } else if (remainingFromIncoming > 0) {
         existing.netContracts = Math.sign(signedQty) * remainingFromIncoming;
-        existing.avgEntryPrice = result.avgPrice;
+        existing.avgEntryPrice = effectiveFillPrice;
       } else {
         existing.netContracts = 0;
         existing.avgEntryPrice = 0;
