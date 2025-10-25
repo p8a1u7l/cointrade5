@@ -5,7 +5,6 @@ import { ControlPanel } from './components/ControlPanel';
 import { MetricCard } from './components/MetricCard';
 import { PerformanceBoard, type PerformanceEntry } from './components/PerformanceBoard';
 import { EquityChart } from './components/EquityChart';
-import { PriceChart } from './components/PriceChart';
 import { MoversBoard } from './components/MoversBoard';
 
 interface MetricsPayload {
@@ -52,9 +51,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [riskLevel, setRiskLevel] = useState(3);
-  const [selectedSymbol, setSelectedSymbol] = useState(
-    () => dashboardConfig.symbols[0] ?? 'BTCUSDT'
-  );
   const openAiUsage = metrics?.openAi;
   const totalCalls = openAiUsage?.calls ?? 0;
   const primaryModel = openAiUsage?.byModel && openAiUsage.byModel.length > 0 ? openAiUsage.byModel[0] : null;
@@ -77,17 +73,6 @@ export default function App() {
       minimumFractionDigits: 6,
       maximumFractionDigits: 6,
     });
-
-  const availableSymbols = dashboardConfig.symbols;
-
-  useEffect(() => {
-    if (availableSymbols.length === 0) {
-      return;
-    }
-    setSelectedSymbol((current) =>
-      availableSymbols.includes(current) ? current : availableSymbols[0]
-    );
-  }, [availableSymbols]);
 
   useEffect(() => {
     void initialize();
@@ -223,43 +208,6 @@ export default function App() {
       <main className="mx-auto w-full max-w-[1600px] px-6 py-12">
         <div className="grid grid-cols-1 gap-10 xl:grid-cols-[2.7fr_1fr] 2xl:gap-12">
           <section className="space-y-8">
-            <div className="space-y-5">
-              {availableSymbols.length > 0 && (
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex flex-col gap-2">
-                    <span className="text-xs uppercase tracking-[0.35em] text-slate-300/70">
-                      Symbol focus
-                    </span>
-                    <div className="flex flex-wrap gap-2">
-                      {availableSymbols.map((symbol) => {
-                        const isActive = symbol === selectedSymbol;
-                        return (
-                          <button
-                            key={symbol}
-                            type="button"
-                            onClick={() => setSelectedSymbol(symbol)}
-                            className={clsx(
-                              'rounded-full border px-3 py-1.5 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-emerald-300/60',
-                              isActive
-                                ? 'border-emerald-400/70 bg-emerald-400/20 text-emerald-100'
-                                : 'border-white/10 bg-slate-950/60 text-slate-200 hover:border-emerald-300/60 hover:text-emerald-100'
-                            )}
-                          >
-                            {symbol}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <div className="text-xs uppercase tracking-[0.35em] text-slate-400/70">
-                    {availableSymbols.length} tracked
-                  </div>
-                </div>
-              )}
-
-              <PriceChart symbol={selectedSymbol} endpoint={dashboardConfig.chartsEndpoint} />
-            </div>
-
             <EquityChart endpoint={dashboardConfig.equityEndpoint} />
 
             <div className="rounded-3xl border border-white/10 bg-gradient-to-r from-slate-950/80 via-blue-900/40 to-slate-950/80 p-8 shadow-[0_40px_120px_-65px_rgba(59,130,246,0.6)]">

@@ -102,6 +102,93 @@ export class BinanceClient {
   constructor() {
     this.baseUrl = REST_BASE_URL;
     this.symbolFilters = new Map();
+    this.exchangeInfoCache = { timestamp: 0, ttl: 5 * 60 * 1000, bySymbol: new Map() };
+  }
+
+  async loadExchangeInfo(options = {}) {
+    const now = Date.now();
+    const ttl = Number.isFinite(options.ttl) ? Number(options.ttl) : this.exchangeInfoCache.ttl;
+    const age = now - this.exchangeInfoCache.timestamp;
+    if (!options.force && this.exchangeInfoCache.bySymbol.size > 0 && age < ttl) {
+      return this.exchangeInfoCache;
+    }
+
+    const response = await fetch(`${this.baseUrl}/fapi/v1/exchangeInfo`);
+    if (!response.ok) {
+      throw new Error(`Binance exchange info request failed: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    if (!Array.isArray(payload?.symbols)) {
+      throw new Error('Binance exchange info payload was not an array');
+    }
+
+    const bySymbol = new Map();
+    for (const entry of payload.symbols) {
+      if (!entry?.symbol) continue;
+      const key = String(entry.symbol).toUpperCase();
+      bySymbol.set(key, {
+        raw: entry,
+        status: entry.status,
+        contractType: entry.contractType,
+        quoteAsset: entry.quoteAsset,
+        permissions: Array.isArray(entry.permissions) ? entry.permissions.map((value) => String(value)) : [],
+        filters: Array.isArray(entry.filters) ? entry.filters : [],
+        quantityPrecision: Number(entry.quantityPrecision),
+      });
+    }
+
+    this.exchangeInfoCache = {
+      timestamp: now,
+      ttl,
+      bySymbol,
+    };
+
+    return this.exchangeInfoCache;
+  }
+
+  async getSymbolMeta(symbol) {
+    if (!symbol) return null;
+    const cache = await this.loadExchangeInfo();
+    return cache.bySymbol.get(symbol.toUpperCase()) ?? null;
+  }
+
+  _isTradablePerpetual(meta, quoteFilter) {
+    if (!meta) return false;
+    if (meta.status !== 'TRADING') return false;
+    if (meta.contractType && meta.contractType !== 'PERPETUAL') return false;
+    if (quoteFilter && quoteFilter.size > 0 && !quoteFilter.has(String(meta.quoteAsset ?? '').toUpperCase())) {
+      return false;
+    }
+    if (Array.isArray(meta.permissions) && meta.permissions.length > 0) {
+      const normalized = meta.permissions.map((value) => String(value).toUpperCase());
+      const allowed = ['USDTMARGINEDFUTURES', 'TRD_GRP_005', 'FUTURE'];
+      if (!normalized.some((value) => allowed.includes(value))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async filterTradableSymbols(symbols, quoteAssets = undefined) {
+    if (!Array.isArray(symbols) || symbols.length === 0) {
+      return [];
+    }
+    const cache = await this.loadExchangeInfo();
+    const quoteFilter = Array.isArray(quoteAssets) && quoteAssets.length > 0
+      ? new Set(quoteAssets.map((asset) => asset.toUpperCase()))
+      : undefined;
+    const unique = new Set();
+    for (const symbol of symbols) {
+      const key = typeof symbol === 'string' ? symbol.toUpperCase() : undefined;
+      if (!key) continue;
+      if (unique.has(key)) continue;
+      const meta = cache.bySymbol.get(key);
+      if (this._isTradablePerpetual(meta, quoteFilter)) {
+        unique.add(key);
+      }
+    }
+    return Array.from(unique);
   }
 
   async fetchKlines(symbol, interval = '1m', limit = 120) {
@@ -349,23 +436,13 @@ export class BinanceClient {
       return this.symbolFilters.get(key);
     }
 
-    const response = await fetch(
-      `${this.baseUrl}/fapi/v1/exchangeInfo?symbol=${encodeURIComponent(key)}`
-    );
-    if (!response.ok) {
-      throw new Error(`Binance exchange info request failed: ${response.status}`);
-    }
-    const payload = await response.json();
-    const info = Array.isArray(payload?.symbols) ? payload.symbols[0] : null;
-    if (!info) {
-      throw new Error(`Exchange info missing symbol data for ${key}`);
+    const meta = await this.getSymbolMeta(key);
+    if (!this._isTradablePerpetual(meta)) {
+      const received = meta?.raw?.symbol ? String(meta.raw.symbol).toUpperCase() : 'unknown';
+      throw new Error(`Exchange info for ${key} not available on Binance (received ${received})`);
     }
 
-    const reportedSymbol = typeof info.symbol === 'string' ? info.symbol.toUpperCase() : '';
-    if (reportedSymbol !== key) {
-      throw new Error(`Exchange info for ${key} not available on Binance (received ${reportedSymbol || 'unknown'})`);
-    }
-
+    const info = meta.raw ?? {};
     const findFilter = (type) =>
       Array.isArray(info.filters) ? info.filters.find((filter) => filter?.filterType === type) : undefined;
 
@@ -396,8 +473,8 @@ export class BinanceClient {
     const marketMaxQty = toNumber(marketLotFilter?.maxQty, Number.POSITIVE_INFINITY);
     const lotMaxQty = toNumber(lotFilter?.maxQty, Number.POSITIVE_INFINITY);
 
-    const quantityPrecision = Number.isFinite(Number(info.quantityPrecision))
-      ? Math.max(0, Math.floor(Number(info.quantityPrecision)))
+    const quantityPrecision = Number.isFinite(Number(meta.quantityPrecision))
+      ? Math.max(0, Math.floor(Number(meta.quantityPrecision)))
       : undefined;
     const stepSizePrecision = parsePrecision(effectiveLotFilter?.stepSize ?? lotFilter?.stepSize);
 
@@ -621,12 +698,21 @@ export class BinanceClient {
       throw new Error('Binance 24hr ticker payload was not an array');
     }
 
+    const cache = await this.loadExchangeInfo();
+    const quoteFilter = new Set(quoteAssets);
+    const tradableSet = new Set(
+      Array.from(cache.bySymbol.entries())
+        .filter(([, meta]) => this._isTradablePerpetual(meta, quoteFilter))
+        .map(([key]) => key)
+    );
+
     const ranked = [];
     for (const entry of data) {
       const symbol = typeof entry.symbol === 'string' ? entry.symbol.toUpperCase() : undefined;
       if (!symbol) continue;
       const matchingQuote = quoteAssets.find((asset) => symbol.endsWith(asset));
       if (!matchingQuote) continue;
+      if (!tradableSet.has(symbol)) continue;
 
       const priceChangePercent = Number(entry.priceChangePercent ?? entry.priceChange_pct ?? entry.priceChange);
       const lastPrice = Number(entry.lastPrice ?? entry.prevClosePrice ?? entry.close ?? entry.price);

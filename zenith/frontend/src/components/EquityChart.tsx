@@ -107,36 +107,99 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
     return { minEquity: min, maxEquity: max };
   }, [enrichedPoints]);
 
-  const chartPoints = useMemo(() => {
-    if (enrichedPoints.length === 0) return [] as { x: number; y: number; equity: number; timestamp: string }[];
+  const candles = useMemo(() => {
+    if (enrichedPoints.length < 2) return [] as {
+      time: number;
+      timestamp: string;
+      open: number;
+      close: number;
+      high: number;
+      low: number;
+    }[];
+    const series = [] as {
+      time: number;
+      timestamp: string;
+      open: number;
+      close: number;
+      high: number;
+      low: number;
+    }[];
+    for (let i = 1; i < enrichedPoints.length; i += 1) {
+      const prev = enrichedPoints[i - 1];
+      const current = enrichedPoints[i];
+      const open = prev.equity;
+      const close = current.equity;
+      const balanceValues = [prev.balance, current.balance].filter((value) => Number.isFinite(value)) as number[];
+      const extremeValues = [open, close, ...balanceValues];
+      const high = Math.max(...extremeValues);
+      const low = Math.min(...extremeValues);
+      series.push({
+        time: current.time,
+        timestamp: current.timestamp,
+        open,
+        close,
+        high,
+        low,
+      });
+    }
+    return series;
+  }, [enrichedPoints]);
+
+  const priceRange = useMemo(() => {
+    if (candles.length === 0) {
+      return { min: 0, max: 1 };
+    }
+    let min = candles[0].low;
+    let max = candles[0].high;
+    for (const candle of candles) {
+      if (candle.low < min) min = candle.low;
+      if (candle.high > max) max = candle.high;
+    }
+    if (min === max) {
+      min -= 1;
+      max += 1;
+    }
+    return { min, max };
+  }, [candles]);
+
+  const candleShapes = useMemo(() => {
+    if (candles.length === 0) return [] as {
+      x: number;
+      bodyWidth: number;
+      highY: number;
+      lowY: number;
+      openY: number;
+      closeY: number;
+      timestamp: string;
+      open: number;
+      close: number;
+    }[];
     const usableWidth = chartWidth - paddingX * 2;
     const usableHeight = chartHeight - paddingY * 2;
-    const step = enrichedPoints.length > 1 ? usableWidth / (enrichedPoints.length - 1) : 0;
-    return enrichedPoints.map((point, index) => {
-      const ratio = (point.equity - minEquity) / (maxEquity - minEquity);
-      const x = paddingX + index * step;
-      const y = chartHeight - paddingY - ratio * usableHeight;
-      return { x, y, equity: point.equity, timestamp: point.timestamp };
+    const step = candles.length > 1 ? usableWidth / (candles.length - 1) : 0;
+    const bodyWidth = Math.min(24, Math.max(6, usableWidth / Math.max(candles.length * 1.6, 1)));
+
+    const scaleY = (value: number) =>
+      chartHeight - paddingY - ((value - priceRange.min) / (priceRange.max - priceRange.min)) * usableHeight;
+
+    return candles.map((candle, index) => {
+      const x = candles.length === 1 ? paddingX + usableWidth / 2 : paddingX + index * step;
+      return {
+        x,
+        bodyWidth,
+        highY: scaleY(candle.high),
+        lowY: scaleY(candle.low),
+        openY: scaleY(candle.open),
+        closeY: scaleY(candle.close),
+        timestamp: candle.timestamp,
+        open: candle.open,
+        close: candle.close,
+      };
     });
-  }, [enrichedPoints, minEquity, maxEquity]);
+  }, [candles, priceRange.max, priceRange.min]);
 
-  const pathD = useMemo(() => {
-    if (chartPoints.length === 0) return '';
-    return chartPoints
-      .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
-      .join(' ');
-  }, [chartPoints]);
-
-  const areaD = useMemo(() => {
-    if (chartPoints.length === 0) return '';
-    const first = chartPoints[0];
-    const last = chartPoints[chartPoints.length - 1];
-    const baselineY = chartHeight - paddingY;
-    return `${pathD} L ${last.x.toFixed(2)} ${baselineY} L ${first.x.toFixed(2)} ${baselineY} Z`;
-  }, [chartPoints, pathD]);
-
-  const latestPoint = chartPoints[chartPoints.length - 1];
-  const earliestPoint = chartPoints[0];
+  const latestPoint = enrichedPoints.length > 0 ? enrichedPoints[enrichedPoints.length - 1] : null;
+  const earliestPoint = enrichedPoints.length > 0 ? enrichedPoints[0] : null;
 
   const changePct = useMemo(() => {
     if (!earliestPoint || !latestPoint) return 0;
@@ -172,10 +235,10 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
               <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Drawdown</span>
               <span className="text-sm font-semibold text-rose-200">{formatUsd(minEquity)}</span>
             </div>
-            <div>
-              <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Points</span>
-              <span className="text-sm font-semibold text-white">{chartPoints.length}</span>
-            </div>
+              <div>
+                <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Points</span>
+                <span className="text-sm font-semibold text-white">{enrichedPoints.length}</span>
+              </div>
           </div>
         )}
       </div>
@@ -186,7 +249,7 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
         <div className="flex h-[360px] items-center justify-center rounded-2xl border border-rose-400/40 bg-rose-500/10 text-sm text-rose-100">
           {error}
         </div>
-      ) : chartPoints.length < 2 ? (
+      ) : candleShapes.length === 0 ? (
         <div className="flex h-[360px] items-center justify-center rounded-2xl border border-white/10 bg-slate-900/60 text-sm text-slate-300/70">
           Not enough equity history yet.
         </div>
@@ -194,41 +257,62 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
         <div className="overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-slate-900/60 to-slate-950/90">
           <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="h-full w-full">
             <defs>
-              <linearGradient id="equityGradient" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stopColor="rgba(14,165,233,0.45)" />
-                <stop offset="100%" stopColor="rgba(15,23,42,0.05)" />
-              </linearGradient>
-              <linearGradient id="equityStroke" x1="0" x2="1" y1="0" y2="0">
-                <stop offset="0%" stopColor="rgba(14,165,233,0.7)" />
-                <stop offset="100%" stopColor="rgba(14,165,233,0.35)" />
-              </linearGradient>
               <pattern id="equityGrid" width="80" height="40" patternUnits="userSpaceOnUse">
                 <path d="M 80 0 L 0 0 0 40" fill="none" stroke="rgba(148,163,184,0.12)" strokeWidth="1" />
               </pattern>
             </defs>
 
             <rect x="0" y="0" width={chartWidth} height={chartHeight} fill="url(#equityGrid)" />
-            <path d={areaD} fill="url(#equityGradient)" opacity={0.9} />
-            <path d={pathD} fill="none" stroke="url(#equityStroke)" strokeWidth={3} strokeLinecap="round" />
-
-            {chartPoints.map((point, index) =>
-              index % Math.max(1, Math.floor(chartPoints.length / 6)) === 0 || index === chartPoints.length - 1 ? (
-                <g key={`${point.timestamp}-${index}`}>
+            {candleShapes.map((candle, index) => {
+              const bullish = candle.close >= candle.open;
+              const bodyHeight = Math.abs(candle.openY - candle.closeY) || 1;
+              const bodyY = Math.min(candle.openY, candle.closeY);
+              const color = bullish ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)';
+              const borderColor = bullish ? 'rgba(34,197,94,0.9)' : 'rgba(248,113,113,0.9)';
+              const wickColor = bullish ? 'rgba(134,239,172,0.8)' : 'rgba(252,165,165,0.8)';
+              return (
+                <g key={`${candle.timestamp}-${index}`}>
                   <line
-                    x1={point.x}
-                    x2={point.x}
+                    x1={candle.x}
+                    x2={candle.x}
+                    y1={candle.highY}
+                    y2={candle.lowY}
+                    stroke={wickColor}
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                  />
+                  <rect
+                    x={candle.x - candle.bodyWidth / 2}
+                    y={bodyY}
+                    width={candle.bodyWidth}
+                    height={bodyHeight < 1 ? 1 : bodyHeight}
+                    fill={color}
+                    stroke={borderColor}
+                    strokeWidth={1.5}
+                    rx={3}
+                  />
+                </g>
+              );
+            })}
+
+            {candleShapes.map((candle, index) =>
+              index % Math.max(1, Math.ceil(candleShapes.length / 6)) === 0 || index === candleShapes.length - 1 ? (
+                <g key={`axis-${candle.timestamp}-${index}`}>
+                  <line
+                    x1={candle.x}
+                    x2={candle.x}
                     y1={chartHeight - paddingY}
                     y2={chartHeight - paddingY + 8}
-                    stroke="rgba(148,163,184,0.4)"
+                    stroke="rgba(148,163,184,0.35)"
                     strokeWidth={1}
                   />
                   <text
-                    x={point.x}
-                    y={chartHeight - paddingY + 24}
+                    x={candle.x}
+                    y={chartHeight - paddingY + 22}
                     textAnchor="middle"
                     className="fill-white/80 text-[10px]"
                   >
-                    {formatTime(point.timestamp)}
+                    {formatTime(candle.timestamp)}
                   </text>
                 </g>
               ) : null
@@ -238,18 +322,18 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
               <line
                 x1={paddingX}
                 x2={chartWidth - paddingX}
-                y1={chartPoints[chartPoints.length - 1].y}
-                y2={chartPoints[chartPoints.length - 1].y}
+                y1={candleShapes[candleShapes.length - 1].closeY}
+                y2={candleShapes[candleShapes.length - 1].closeY}
                 stroke="rgba(56,189,248,0.35)"
                 strokeDasharray="6 6"
                 strokeWidth={1}
               />
               <text
                 x={chartWidth - paddingX + 8}
-                y={chartPoints[chartPoints.length - 1].y + 4}
+                y={candleShapes[candleShapes.length - 1].closeY + 4}
                 className="fill-white text-[11px]"
               >
-                {formatUsd(chartPoints[chartPoints.length - 1].equity)}
+                {formatUsd(candleShapes[candleShapes.length - 1].close)}
               </text>
             </g>
           </svg>

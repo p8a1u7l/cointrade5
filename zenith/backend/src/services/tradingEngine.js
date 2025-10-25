@@ -93,6 +93,7 @@ export class TradingEngine extends TypedEventEmitter {
     this.loopInFlight = false;
     this.aiCooldownMs = 45_000;
     this.aiRevalidationMs = 240_000;
+    this.baseSymbolsValidated = false;
 
     this.stream.on('tick', (tick) => {
       this.latestTicks.set(tick.symbol, tick);
@@ -164,6 +165,18 @@ export class TradingEngine extends TypedEventEmitter {
   async refreshSymbolUniverse(options = {}) {
     const discovery = config.binance.symbolDiscovery ?? {};
     const enabled = discovery.enabled !== false;
+    if (!this.baseSymbolsValidated) {
+      try {
+        const validated = await this.binance.filterTradableSymbols(this.baseSymbols, discovery.quoteAssets);
+        if (validated.length > 0) {
+          this.baseSymbols = validated;
+          this.activeSymbols = [...validated];
+          this.baseSymbolsValidated = true;
+        }
+      } catch (error) {
+        logger.error({ error }, 'Failed to validate base Binance symbols');
+      }
+    }
     if (!enabled) {
       this._updateActiveSymbols(this.baseSymbols);
       return { symbols: this.getActiveSymbols(), movers: [] };
@@ -202,14 +215,19 @@ export class TradingEngine extends TypedEventEmitter {
         : dynamicCandidates;
 
       const nextSymbols = [...this.baseSymbols, ...limitedDynamics];
-      const changed = this._updateActiveSymbols(nextSymbols);
+      const tradable = await this.binance.filterTradableSymbols(nextSymbols, discovery.quoteAssets);
+      if (tradable.length === 0) {
+        logger.warn('Binance symbol scan returned no tradable instruments, falling back to base set');
+      }
+      const candidate = tradable.length > 0 ? tradable : this.baseSymbols;
+      const changed = this._updateActiveSymbols(candidate);
 
       if (changed) {
         logger.info(
           {
             base: this.baseSymbols.length,
-            dynamic: nextSymbols.length - this.baseSymbols.length,
-            total: nextSymbols.length,
+            dynamic: Math.max(candidate.length - this.baseSymbols.length, 0),
+            total: candidate.length,
           },
           'Updated active symbol universe from Binance movers scan'
         );
