@@ -19,6 +19,7 @@ const RISK_LEVERAGE = {
 
 const BASE_ORDER_NOTIONAL = 40;
 const DEFAULT_CONFIDENCE_GUESS = 0.75;
+const MARGIN_USAGE_BUFFER = 0.9;
 
 const CONTEXT_SHIFT_THRESHOLD = 0.12;
 const MIN_CONFIDENCE_TO_EXECUTE = 0.62;
@@ -90,6 +91,7 @@ export class TradingEngine extends TypedEventEmitter {
     this.decisionCache = new Map();
     this.strategyAdapter = new StrategyTradeAdapter({ logger });
     this.positionCache = { timestamp: 0, map: new Map() };
+    this.balanceCache = { timestamp: 0, available: 0 };
     this.loopInFlight = false;
     this.aiCooldownMs = 45_000;
     this.aiRevalidationMs = 240_000;
@@ -111,6 +113,10 @@ export class TradingEngine extends TypedEventEmitter {
 
   invalidatePositionCache() {
     this.positionCache = { timestamp: 0, map: new Map() };
+  }
+
+  invalidateBalanceCache() {
+    this.balanceCache = { timestamp: 0, available: 0 };
   }
 
   async getPosition(symbol, options = {}) {
@@ -160,6 +166,29 @@ export class TradingEngine extends TypedEventEmitter {
       entryTime: meta?.entryTime,
       raw,
     };
+  }
+
+  async getAvailableMargin(options = {}) {
+    const now = Date.now();
+    const ttl = Number.isFinite(options.ttl) ? Number(options.ttl) : 3_000;
+    if (!options.forceRefresh && now - this.balanceCache.timestamp < ttl && Number.isFinite(this.balanceCache.available)) {
+      return this.balanceCache.available;
+    }
+
+    try {
+      const balances = await this.binance.fetchAccountBalance();
+      const usdt = balances.find((entry) => entry.asset === 'USDT');
+      const available = Number(usdt?.available ?? usdt?.balance ?? 0);
+      if (!Number.isFinite(available)) {
+        throw new Error('Invalid available balance for USDT');
+      }
+      this.balanceCache = { timestamp: now, available };
+      return available;
+    } catch (error) {
+      logger.error({ error }, 'Failed to refresh available Binance margin');
+      this.balanceCache = { timestamp: now, available: 0 };
+      return 0;
+    }
   }
 
   async refreshSymbolUniverse(options = {}) {
@@ -661,21 +690,47 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const rawQuantity = this.calculateOrderSize(decision.symbol, leverage, confidence, referencePrice);
-    const normalized = await this.binance.ensureTradableQuantity(decision.symbol, rawQuantity, referencePrice);
-    const quantity = normalized?.quantity ?? 0;
+    let normalized = await this.binance.ensureTradableQuantity(decision.symbol, rawQuantity, referencePrice);
+    let quantity = normalized?.quantity ?? 0;
 
     if (!Number.isFinite(quantity) || quantity <= 0) {
       logger.warn({ decision, referencePrice, rawQuantity, normalized }, 'Normalized order size invalid, skipping execution');
       return;
     }
 
+    const marginCheck = await this.enforceMarginLimit(decision.symbol, leverage, referencePrice, normalized, rawQuantity);
+    if (!marginCheck.allowed) {
+      logger.warn({ decision, referencePrice, rawQuantity, normalized }, 'Skipping execution due to margin constraints');
+      return;
+    }
+
+    if (marginCheck.normalized) {
+      normalized = marginCheck.normalized;
+      quantity = normalized?.quantity ?? quantity;
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      logger.warn({ decision, referencePrice, rawQuantity, normalized }, 'Margin-adjusted quantity invalid, skipping execution');
+      return;
+    }
+
     if (Math.abs(quantity - rawQuantity) > Math.max(1e-8, rawQuantity * 0.05)) {
-      logger.debug({ decision, rawQuantity, quantity }, 'Adjusted quantity to satisfy Binance filters');
+      logger.debug({ decision, rawQuantity, quantity }, 'Adjusted quantity after filters/margin checks');
     }
 
     await this.binance.setLeverage(decision.symbol, leverage);
     const quantityParam = normalized?.quantityText ?? quantity;
-    const result = await this.binance.placeMarketOrder(decision.symbol, side, quantityParam);
+    let result;
+    try {
+      result = await this.binance.placeMarketOrder(decision.symbol, side, quantityParam);
+    } catch (error) {
+      this.invalidateBalanceCache();
+      if (error instanceof Error && /margin is insufficient/i.test(error.message)) {
+        logger.error({ decision, error }, 'Binance rejected order due to insufficient margin after guard');
+        return;
+      }
+      throw error;
+    }
     await this.recorder.recordExecution(
       {
         symbol: decision.symbol,
@@ -688,6 +743,7 @@ export class TradingEngine extends TypedEventEmitter {
     );
     this.strategyAdapter?.notifyExecution(decision, result);
     this.invalidatePositionCache();
+    this.invalidateBalanceCache();
     logger.info({ decision, result }, 'Executed market order');
   }
 
@@ -731,6 +787,7 @@ export class TradingEngine extends TypedEventEmitter {
     );
     this.strategyAdapter?.notifyExit(decision, result);
     this.invalidatePositionCache();
+    this.invalidateBalanceCache();
     logger.info({ decision, result }, 'Closed position via strategy exit');
   }
 
@@ -745,6 +802,62 @@ export class TradingEngine extends TypedEventEmitter {
     const quantity = targetNotional / referencePrice;
     logger.debug({ symbol, quantity, referencePrice, targetNotional }, 'Calculated order size');
     return Number(quantity.toFixed(6));
+  }
+
+  async enforceMarginLimit(symbol, leverage, referencePrice, normalized, rawQuantity) {
+    const quantity = normalized?.quantity ?? 0;
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return { allowed: false, normalized };
+    }
+
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
+      return { allowed: true, normalized };
+    }
+
+    const available = await this.getAvailableMargin();
+    if (!Number.isFinite(available) || available <= 0) {
+      logger.warn({ symbol }, 'Insufficient available margin to open new position');
+      return { allowed: false, normalized };
+    }
+
+    const effectiveLeverage = Math.max(leverage, 1);
+    const maxNotional = available * effectiveLeverage * MARGIN_USAGE_BUFFER;
+    if (!Number.isFinite(maxNotional) || maxNotional <= 0) {
+      logger.warn({ symbol, available, leverage: effectiveLeverage }, 'Invalid margin ceiling computed for position sizing');
+      return { allowed: false, normalized };
+    }
+
+    const desiredNotional = quantity * referencePrice;
+    if (desiredNotional <= maxNotional) {
+      return { allowed: true, normalized };
+    }
+
+    const minNotional = normalized?.filters?.minNotional ?? 0;
+    if (maxNotional > 0 && maxNotional < minNotional) {
+      logger.warn({ symbol, desiredNotional, maxNotional, minNotional }, 'Margin cap below Binance minimum notional');
+      return { allowed: false, normalized: { quantity: 0, quantityText: undefined, filters: normalized?.filters } };
+    }
+
+    const cappedQty = maxNotional / referencePrice;
+    const adjusted = await this.binance.ensureTradableQuantity(symbol, cappedQty, referencePrice);
+    const adjustedQty = adjusted?.quantity ?? 0;
+    if (!Number.isFinite(adjustedQty) || adjustedQty <= 0) {
+      logger.warn({ symbol, desiredNotional, maxNotional, cappedQty }, 'Unable to adjust quantity within margin constraints');
+      return { allowed: false, normalized: adjusted ?? normalized };
+    }
+
+    const adjustedNotional = adjustedQty * referencePrice;
+    logger.info({
+      symbol,
+      desiredNotional,
+      adjustedNotional,
+      available,
+      leverage: effectiveLeverage,
+      rawQuantity,
+      adjustedQuantity: adjustedQty,
+    }, 'Reduced order size to respect available margin');
+
+    return { allowed: true, normalized: adjusted };
   }
 
   hasStrongConviction(decision) {

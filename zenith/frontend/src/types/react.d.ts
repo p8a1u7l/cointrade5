@@ -9,9 +9,7 @@ declare module 'react' {
   export function useCallback<T extends (...args: any[]) => any>(factory: T, deps: any[]): T;
   export function useRef<T>(initialValue: T): { current: T };
   export const Fragment: unique symbol;
-  export class StrictMode {
-    props: { children?: ReactNode };
-  }
+  export const StrictMode: FC<{ children?: ReactNode }>;
   export interface HTMLAttributes<T> {
     [key: string]: any;
   }

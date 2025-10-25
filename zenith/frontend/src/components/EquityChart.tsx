@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createChart, CrosshairMode } from 'lightweight-charts';
+import type { CandlestickData, IChartApi, ISeriesApi, UTCTimestamp } from 'lightweight-charts';
 
 interface EquityPoint {
   timestamp: string;
@@ -17,10 +19,7 @@ interface EquityChartProps {
   refreshIntervalMs?: number;
 }
 
-const chartWidth = 960;
-const chartHeight = 360;
-const paddingX = 52;
-const paddingY = 36;
+type EquityCandle = (CandlestickData & { timestamp: string });
 
 const formatUsd = (value: number) =>
   value.toLocaleString(undefined, {
@@ -43,10 +42,17 @@ const formatTime = (timestamp: string) => {
   }
 };
 
+const toUtcTimestamp = (ms: number): UTCTimestamp => Math.floor(ms / 1000) as UTCTimestamp;
+
 export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartProps) {
   const [points, setPoints] = useState<EquityPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const chartContainerRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const hasFittedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,33 +114,18 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
   }, [enrichedPoints]);
 
   const candles = useMemo(() => {
-    if (enrichedPoints.length < 2) return [] as {
-      time: number;
-      timestamp: string;
-      open: number;
-      close: number;
-      high: number;
-      low: number;
-    }[];
-    const series = [] as {
-      time: number;
-      timestamp: string;
-      open: number;
-      close: number;
-      high: number;
-      low: number;
-    }[];
+    if (enrichedPoints.length < 2) return [] as EquityCandle[];
+    const series: EquityCandle[] = [];
     for (let i = 1; i < enrichedPoints.length; i += 1) {
       const prev = enrichedPoints[i - 1];
       const current = enrichedPoints[i];
       const open = prev.equity;
       const close = current.equity;
       const balanceValues = [prev.balance, current.balance].filter((value) => Number.isFinite(value)) as number[];
-      const extremeValues = [open, close, ...balanceValues];
-      const high = Math.max(...extremeValues);
-      const low = Math.min(...extremeValues);
+      const high = Math.max(open, close, ...balanceValues);
+      const low = Math.min(open, close, ...balanceValues);
       series.push({
-        time: current.time,
+        time: toUtcTimestamp(current.time),
         timestamp: current.timestamp,
         open,
         close,
@@ -145,61 +136,118 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
     return series;
   }, [enrichedPoints]);
 
-  const priceRange = useMemo(() => {
-    if (candles.length === 0) {
-      return { min: 0, max: 1 };
+  useEffect(() => {
+    const container = chartContainerRef.current;
+    if (!container) {
+      return;
     }
-    let min = candles[0].low;
-    let max = candles[0].high;
-    for (const candle of candles) {
-      if (candle.low < min) min = candle.low;
-      if (candle.high > max) max = candle.high;
-    }
-    if (min === max) {
-      min -= 1;
-      max += 1;
-    }
-    return { min, max };
-  }, [candles]);
 
-  const candleShapes = useMemo(() => {
-    if (candles.length === 0) return [] as {
-      x: number;
-      bodyWidth: number;
-      highY: number;
-      lowY: number;
-      openY: number;
-      closeY: number;
-      timestamp: string;
-      open: number;
-      close: number;
-    }[];
-    const usableWidth = chartWidth - paddingX * 2;
-    const usableHeight = chartHeight - paddingY * 2;
-    const step = candles.length > 1 ? usableWidth / (candles.length - 1) : 0;
-    const bodyWidth = Math.min(24, Math.max(6, usableWidth / Math.max(candles.length * 1.6, 1)));
-
-    const scaleY = (value: number) =>
-      chartHeight - paddingY - ((value - priceRange.min) / (priceRange.max - priceRange.min)) * usableHeight;
-
-    return candles.map((candle, index) => {
-      const x = candles.length === 1 ? paddingX + usableWidth / 2 : paddingX + index * step;
-      return {
-        x,
-        bodyWidth,
-        highY: scaleY(candle.high),
-        lowY: scaleY(candle.low),
-        openY: scaleY(candle.open),
-        closeY: scaleY(candle.close),
-        timestamp: candle.timestamp,
-        open: candle.open,
-        close: candle.close,
-      };
+    const chart = createChart(container, {
+      layout: {
+        background: { color: 'transparent' },
+        textColor: '#e2e8f0',
+      },
+      grid: {
+        vertLines: { color: 'rgba(148,163,184,0.12)' },
+        horzLines: { color: 'rgba(148,163,184,0.12)' },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+      },
+      rightPriceScale: {
+        borderVisible: false,
+      },
+      leftPriceScale: {
+        visible: false,
+      },
+      timeScale: {
+        borderVisible: false,
+        timeVisible: true,
+        secondsVisible: true,
+        rightOffset: 6,
+        barSpacing: 18,
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
+      },
     });
-  }, [candles, priceRange.max, priceRange.min]);
+
+    const series = chart.addCandlestickSeries({
+      upColor: 'rgba(34,197,94,0.8)',
+      downColor: 'rgba(248,113,113,0.8)',
+      borderUpColor: 'rgba(34,197,94,1)',
+      borderDownColor: 'rgba(248,113,113,1)',
+      wickUpColor: 'rgba(134,239,172,0.9)',
+      wickDownColor: 'rgba(252,165,165,0.9)',
+    });
+
+    chartRef.current = chart;
+    candleSeriesRef.current = series;
+
+    const resize = () => {
+      if (!chartContainerRef.current) return;
+      const width = chartContainerRef.current.clientWidth || 600;
+      const height = Math.max(320, Math.min(560, Math.floor(width * 0.45)));
+      chartContainerRef.current.style.height = `${height}px`;
+      chart.applyOptions({ width, height });
+    };
+
+    resize();
+
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => resize());
+      observer.observe(container);
+    } else {
+      window.addEventListener('resize', resize);
+    }
+
+    return () => {
+      if (observer) {
+        observer.disconnect();
+      } else {
+        window.removeEventListener('resize', resize);
+      }
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      hasFittedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    const chart = chartRef.current;
+    if (!series || !chart) {
+      return;
+    }
+
+    if (candles.length === 0) {
+      series.setData([]);
+      return;
+    }
+
+    const payload = candles.map(({ timestamp: _timestamp, ...rest }) => rest);
+    series.setData(payload);
+    chart.timeScale().scrollToRealTime();
+
+    if (!hasFittedRef.current) {
+      chart.timeScale().fitContent();
+      hasFittedRef.current = true;
+    }
+  }, [candles]);
 
   const latestPoint = enrichedPoints.length > 0 ? enrichedPoints[enrichedPoints.length - 1] : null;
   const earliestPoint = enrichedPoints.length > 0 ? enrichedPoints[0] : null;
+  const lastCandle = candles.length > 0 ? candles[candles.length - 1] : null;
 
   const changePct = useMemo(() => {
     if (!earliestPoint || !latestPoint) return 0;
@@ -235,10 +283,10 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
               <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Drawdown</span>
               <span className="text-sm font-semibold text-rose-200">{formatUsd(minEquity)}</span>
             </div>
-              <div>
-                <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Points</span>
-                <span className="text-sm font-semibold text-white">{enrichedPoints.length}</span>
-              </div>
+            <div>
+              <span className="block text-[0.7rem] uppercase tracking-[0.35em] text-slate-400/60">Points</span>
+              <span className="text-sm font-semibold text-white">{enrichedPoints.length}</span>
+            </div>
           </div>
         )}
       </div>
@@ -249,94 +297,18 @@ export function EquityChart({ endpoint, refreshIntervalMs = 5000 }: EquityChartP
         <div className="flex h-[360px] items-center justify-center rounded-2xl border border-rose-400/40 bg-rose-500/10 text-sm text-rose-100">
           {error}
         </div>
-      ) : candleShapes.length === 0 ? (
+      ) : candles.length === 0 ? (
         <div className="flex h-[360px] items-center justify-center rounded-2xl border border-white/10 bg-slate-900/60 text-sm text-slate-300/70">
           Not enough equity history yet.
         </div>
       ) : (
-        <div className="overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-slate-900/60 to-slate-950/90">
-          <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="h-full w-full">
-            <defs>
-              <pattern id="equityGrid" width="80" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 80 0 L 0 0 0 40" fill="none" stroke="rgba(148,163,184,0.12)" strokeWidth="1" />
-              </pattern>
-            </defs>
-
-            <rect x="0" y="0" width={chartWidth} height={chartHeight} fill="url(#equityGrid)" />
-            {candleShapes.map((candle, index) => {
-              const bullish = candle.close >= candle.open;
-              const bodyHeight = Math.abs(candle.openY - candle.closeY) || 1;
-              const bodyY = Math.min(candle.openY, candle.closeY);
-              const color = bullish ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)';
-              const borderColor = bullish ? 'rgba(34,197,94,0.9)' : 'rgba(248,113,113,0.9)';
-              const wickColor = bullish ? 'rgba(134,239,172,0.8)' : 'rgba(252,165,165,0.8)';
-              return (
-                <g key={`${candle.timestamp}-${index}`}>
-                  <line
-                    x1={candle.x}
-                    x2={candle.x}
-                    y1={candle.highY}
-                    y2={candle.lowY}
-                    stroke={wickColor}
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                  />
-                  <rect
-                    x={candle.x - candle.bodyWidth / 2}
-                    y={bodyY}
-                    width={candle.bodyWidth}
-                    height={bodyHeight < 1 ? 1 : bodyHeight}
-                    fill={color}
-                    stroke={borderColor}
-                    strokeWidth={1.5}
-                    rx={3}
-                  />
-                </g>
-              );
-            })}
-
-            {candleShapes.map((candle, index) =>
-              index % Math.max(1, Math.ceil(candleShapes.length / 6)) === 0 || index === candleShapes.length - 1 ? (
-                <g key={`axis-${candle.timestamp}-${index}`}>
-                  <line
-                    x1={candle.x}
-                    x2={candle.x}
-                    y1={chartHeight - paddingY}
-                    y2={chartHeight - paddingY + 8}
-                    stroke="rgba(148,163,184,0.35)"
-                    strokeWidth={1}
-                  />
-                  <text
-                    x={candle.x}
-                    y={chartHeight - paddingY + 22}
-                    textAnchor="middle"
-                    className="fill-white/80 text-[10px]"
-                  >
-                    {formatTime(candle.timestamp)}
-                  </text>
-                </g>
-              ) : null
-            )}
-
-            <g>
-              <line
-                x1={paddingX}
-                x2={chartWidth - paddingX}
-                y1={candleShapes[candleShapes.length - 1].closeY}
-                y2={candleShapes[candleShapes.length - 1].closeY}
-                stroke="rgba(56,189,248,0.35)"
-                strokeDasharray="6 6"
-                strokeWidth={1}
-              />
-              <text
-                x={chartWidth - paddingX + 8}
-                y={candleShapes[candleShapes.length - 1].closeY + 4}
-                className="fill-white text-[11px]"
-              >
-                {formatUsd(candleShapes[candleShapes.length - 1].close)}
-              </text>
-            </g>
-          </svg>
+        <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-slate-900/60 to-slate-950/90">
+          <div ref={chartContainerRef} className="w-full" />
+          {lastCandle && (
+            <div className="pointer-events-none absolute right-4 top-4 rounded-full bg-slate-900/80 px-3 py-1 text-xs font-semibold text-sky-100 ring-1 ring-sky-400/40">
+              {formatUsd(lastCandle.close)} · {formatTime(lastCandle.timestamp)}
+            </div>
+          )}
         </div>
       )}
     </div>
