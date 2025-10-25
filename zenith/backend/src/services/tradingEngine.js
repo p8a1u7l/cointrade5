@@ -17,6 +17,7 @@ const MIN_CONFIDENCE_TO_EXECUTE = 0.62;
 const MIN_LOCAL_EDGE = 0.4;
 const MIN_LOCAL_CONFIDENCE = 0.55;
 const POSITION_EPSILON = 1e-8;
+const VALID_SYMBOL_REGEX = /^[A-Z0-9]+$/;
 
 const toNumber = (value) => {
   const numeric = Number(value);
@@ -73,7 +74,15 @@ function computeContextShift(previous, next) {
 export class TradingEngine extends TypedEventEmitter {
   constructor(symbols) {
     super();
-    this.baseSymbols = Array.from(new Set(Array.isArray(symbols) ? symbols.map((s) => s.toUpperCase()) : []));
+    this.baseSymbols = Array.from(
+      new Set(
+        Array.isArray(symbols)
+          ? symbols
+              .map((s) => (typeof s === 'string' ? s.toUpperCase() : ''))
+              .filter((s) => VALID_SYMBOL_REGEX.test(s))
+          : []
+      )
+    );
     this.activeSymbols = [...this.baseSymbols];
     this.cachedTopMovers = [];
     this.lastSymbolRefresh = 0;
@@ -355,7 +364,7 @@ export class TradingEngine extends TypedEventEmitter {
   _updateActiveSymbols(nextSymbols) {
     const blocked = this.blockedSymbols;
     const unique = Array.from(new Set((nextSymbols ?? []).map((symbol) => symbol.toUpperCase()))).filter(
-      (symbol) => !blocked.has(symbol)
+      (symbol) => VALID_SYMBOL_REGEX.test(symbol) && !blocked.has(symbol)
     );
     const changed =
       unique.length !== this.activeSymbols.length ||
@@ -1133,28 +1142,46 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const effectiveLeverage = Math.max(leverage, 1);
-    const maxNotional = available * effectiveLeverage * MARGIN_USAGE_BUFFER;
-    if (!Number.isFinite(maxNotional) || maxNotional <= 0) {
+    const marginCap = available * effectiveLeverage * MARGIN_USAGE_BUFFER;
+    if (!Number.isFinite(marginCap) || marginCap <= 0) {
       logger.warn({ symbol, available, leverage: effectiveLeverage }, 'Invalid margin ceiling computed for position sizing');
       return { allowed: false, normalized };
     }
 
     const desiredNotional = quantity * referencePrice;
-    if (desiredNotional <= maxNotional) {
+    let capSource = 'margin';
+    let effectiveCap = marginCap;
+
+    try {
+      const leverageCap = await this.binance.getMaxNotionalForLeverage(symbol, effectiveLeverage);
+      if (Number.isFinite(leverageCap) && leverageCap > 0 && leverageCap < effectiveCap) {
+        effectiveCap = leverageCap;
+        capSource = 'leverageBracket';
+      }
+    } catch (error) {
+      logger.warn({ error, symbol }, 'Unable to fetch leverage bracket cap, relying on margin cap only');
+    }
+
+    if (desiredNotional <= effectiveCap) {
       return { allowed: true, normalized };
     }
 
     const minNotional = normalized?.filters?.minNotional ?? 0;
-    if (maxNotional > 0 && maxNotional < minNotional) {
-      logger.warn({ symbol, desiredNotional, maxNotional, minNotional }, 'Margin cap below Binance minimum notional');
+    if (effectiveCap > 0 && effectiveCap < minNotional) {
+      logger.warn({ symbol, desiredNotional, effectiveCap, minNotional, capSource }, 'Order cap below Binance minimum notional');
       return { allowed: false, normalized: { quantity: 0, quantityText: undefined, filters: normalized?.filters } };
     }
 
-    const cappedQty = maxNotional / referencePrice;
+    if (!Number.isFinite(effectiveCap) || effectiveCap <= 0) {
+      logger.warn({ symbol, desiredNotional, effectiveCap, capSource }, 'Effective order cap invalid');
+      return { allowed: false, normalized };
+    }
+
+    const cappedQty = effectiveCap / referencePrice;
     const adjusted = await this.binance.ensureTradableQuantity(symbol, cappedQty, referencePrice);
     const adjustedQty = adjusted?.quantity ?? 0;
     if (!Number.isFinite(adjustedQty) || adjustedQty <= 0) {
-      logger.warn({ symbol, desiredNotional, maxNotional, cappedQty }, 'Unable to adjust quantity within margin constraints');
+      logger.warn({ symbol, desiredNotional, effectiveCap, cappedQty, capSource }, 'Unable to adjust quantity within order cap');
       return { allowed: false, normalized: adjusted ?? normalized };
     }
 
@@ -1167,7 +1194,8 @@ export class TradingEngine extends TypedEventEmitter {
       leverage: effectiveLeverage,
       rawQuantity,
       adjustedQuantity: adjustedQty,
-    }, 'Reduced order size to respect available margin');
+      capSource,
+    }, 'Reduced order size to respect risk caps');
 
     return { allowed: true, normalized: adjusted };
   }

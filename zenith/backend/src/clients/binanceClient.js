@@ -103,6 +103,11 @@ export class BinanceClient {
     this.baseUrl = REST_BASE_URL;
     this.symbolFilters = new Map();
     this.exchangeInfoCache = { timestamp: 0, ttl: 5 * 60 * 1000, bySymbol: new Map() };
+    this.leverageBracketsCache = {
+      timestamp: 0,
+      ttl: 60 * 1000,
+      bySymbol: new Map(),
+    };
   }
 
   async loadExchangeInfo(options = {}) {
@@ -200,6 +205,7 @@ export class BinanceClient {
     for (const symbol of symbols) {
       const key = typeof symbol === 'string' ? symbol.toUpperCase() : undefined;
       if (!key) continue;
+      if (!/^[A-Z0-9]+$/.test(key)) continue;
       if (unique.has(key)) continue;
       const meta = cache.bySymbol.get(key);
       if (this._isTradablePerpetual(meta, quoteFilter)) {
@@ -513,6 +519,75 @@ export class BinanceClient {
     return filters;
   }
 
+  async loadLeverageBrackets(options = {}) {
+    const now = Date.now();
+    const ttl = Number.isFinite(options.ttl) ? Number(options.ttl) : this.leverageBracketsCache.ttl;
+    const age = now - this.leverageBracketsCache.timestamp;
+    if (!options.force && this.leverageBracketsCache.bySymbol.size > 0 && age < ttl) {
+      return this.leverageBracketsCache;
+    }
+
+    const payload = await this.request('GET', '/fapi/v1/leverageBracket');
+    if (!Array.isArray(payload)) {
+      throw new Error('Binance leverage bracket payload was not an array');
+    }
+
+    const bySymbol = new Map();
+    for (const entry of payload) {
+      if (!entry?.symbol) continue;
+      const symbol = String(entry.symbol).toUpperCase();
+      const brackets = Array.isArray(entry.brackets)
+        ? entry.brackets
+            .map((bracket) => ({
+              notionalCap: Number(bracket?.notionalCap ?? bracket?.notionalUpper ?? bracket?.cap ?? 0),
+              notionalFloor: Number(bracket?.notionalFloor ?? bracket?.notionalLower ?? bracket?.floor ?? 0),
+              initialLeverage: Number(bracket?.initialLeverage ?? bracket?.initialLeverageCap ?? 0),
+            }))
+            .filter((bracket) => Number.isFinite(bracket.notionalCap) && bracket.notionalCap > 0)
+        : [];
+      bySymbol.set(symbol, brackets);
+    }
+
+    this.leverageBracketsCache = {
+      timestamp: now,
+      ttl,
+      bySymbol,
+    };
+
+    return this.leverageBracketsCache;
+  }
+
+  async getLeverageBracket(symbol) {
+    if (!symbol) {
+      return [];
+    }
+    const cache = await this.loadLeverageBrackets();
+    return cache.bySymbol.get(symbol.toUpperCase()) ?? [];
+  }
+
+  async getMaxNotionalForLeverage(symbol, leverage) {
+    const safeLeverage = Math.max(Number(leverage) || 1, 1);
+    const brackets = await this.getLeverageBracket(symbol);
+    if (!Array.isArray(brackets) || brackets.length === 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    let bestCap = 0;
+    for (const bracket of brackets) {
+      if (!Number.isFinite(bracket.initialLeverage) || bracket.initialLeverage <= 0) {
+        continue;
+      }
+      if (bracket.initialLeverage >= safeLeverage) {
+        const cap = Number(bracket.notionalCap);
+        if (Number.isFinite(cap) && cap > bestCap) {
+          bestCap = cap;
+        }
+      }
+    }
+
+    return bestCap > 0 ? bestCap : Number.POSITIVE_INFINITY;
+  }
+
   static quantize(value, stepSize) {
     if (!Number.isFinite(value) || value <= 0) return 0;
     if (!Number.isFinite(stepSize) || stepSize <= 0) {
@@ -735,6 +810,9 @@ export class BinanceClient {
     for (const entry of data) {
       const symbol = typeof entry.symbol === 'string' ? entry.symbol.toUpperCase() : undefined;
       if (!symbol) continue;
+      if (!/^[A-Z0-9]+$/.test(symbol)) {
+        continue;
+      }
       const matchingQuote = quoteAssets.find((asset) => symbol.endsWith(asset));
       if (!matchingQuote) continue;
       if (!tradableSet.has(symbol)) continue;
