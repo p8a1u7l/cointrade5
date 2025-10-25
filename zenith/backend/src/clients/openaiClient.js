@@ -221,26 +221,6 @@ function parseStrategyPayload(payload, fallbackSymbol) {
   };
 }
 
-function extractPayload(data) {
-  const choices = Array.isArray(data?.choices) ? data.choices : [];
-  const choice = choices[0];
-  if (!choice) {
-    return undefined;
-  }
-
-  const content = choice?.message?.content;
-  if (typeof content !== 'string' || !content.trim()) {
-    return undefined;
-  }
-
-  // Try to extract JSON from the content, handling potential code block wrapping
-  const cleaned = content.trim()
-    .replace(/^```(?:json)?\s*/, '')
-    .replace(/```\s*$/, '');
-
-  return cleaned;
-}
-
 function summarizeAttempts(attempts) {
   const summary = {
     promptTokens: 0,
@@ -288,55 +268,170 @@ function summarizeAttempts(attempts) {
   return summary;
 }
 
+function buildRequestHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.openAi.apiKey}`,
+  };
+}
+
+function buildChatBody(prompt, spec) {
+  return {
+    model: spec.id,
+    messages: [
+      { role: 'system', content: STRATEGY_SYSTEM_PROMPT },
+      { role: 'user', content: prompt },
+    ],
+    max_completion_tokens: spec.maxOutputTokens,
+    metadata: {
+      application: 'zenith-trader',
+      intent: 'strategy',
+    },
+  };
+}
+
+function buildResponsesBody(prompt, spec) {
+  return {
+    model: spec.id,
+    input: [
+      { role: 'system', content: STRATEGY_SYSTEM_PROMPT },
+      { role: 'user', content: prompt },
+    ],
+    max_output_tokens: spec.maxOutputTokens,
+    metadata: {
+      application: 'zenith-trader',
+      intent: 'strategy',
+    },
+  };
+}
+
+function extractFinishReason(data) {
+  const firstChoice = Array.isArray(data?.choices) ? data.choices[0] : undefined;
+  if (firstChoice?.finish_reason || firstChoice?.message?.finish_reason) {
+    return firstChoice.finish_reason ?? firstChoice.message.finish_reason;
+  }
+
+  const firstOutput = Array.isArray(data?.output) ? data.output[0] : undefined;
+  return firstOutput?.finish_reason ?? firstOutput?.metadata?.finish_reason;
+}
+
+function extractPayload(data) {
+  const choices = Array.isArray(data?.choices) ? data.choices : [];
+  const choice = choices[0];
+  if (choice) {
+    const content = choice?.message?.content;
+    if (typeof content === 'string' && content.trim()) {
+      const cleaned = content.trim()
+        .replace(/^```(?:json)?\s*/, '')
+        .replace(/```\s*$/, '');
+      return cleaned;
+    }
+  }
+
+  const outputs = Array.isArray(data?.output) ? data.output : [];
+  for (const output of outputs) {
+    const contentParts = Array.isArray(output?.content) ? output.content : [];
+    for (const part of contentParts) {
+      const text = typeof part?.text === 'string' ? part.text : part?.content;
+      if (typeof text === 'string' && text.trim()) {
+        const cleaned = text.trim()
+          .replace(/^```(?:json)?\s*/, '')
+          .replace(/```\s*$/, '');
+        if (cleaned) {
+          return cleaned;
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+async function performOpenAiRequest({ url, body, controller }) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: buildRequestHeaders(),
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  });
+
+  const raw = await response.text();
+  let data;
+  try {
+    data = raw.length > 0 ? JSON.parse(raw) : {};
+  } catch (error) {
+    const parseError = new Error('Failed to parse OpenAI response payload');
+    parseError.cause = error;
+    parseError.body = raw;
+    throw parseError;
+  }
+
+  if (!response.ok) {
+    const message =
+      typeof data?.error?.message === 'string'
+        ? `OpenAI responded with status ${response.status}: ${data.error.message}`
+        : `OpenAI responded with status ${response.status}`;
+    const error = new Error(message);
+    error.body = data;
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
+}
+
+function shouldFallbackToChat(error) {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const message = typeof error.message === 'string' ? error.message.toLowerCase() : '';
+  const bodyMessage = typeof error?.body?.error?.message === 'string' ? error.body.error.message.toLowerCase() : '';
+
+  return message.includes('only supported in v1/chat/completions') || bodyMessage.includes('v1/chat/completions');
+}
+
+function shouldFallbackToResponses(error) {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const message = typeof error.message === 'string' ? error.message.toLowerCase() : '';
+  const bodyMessage = typeof error?.body?.error?.message === 'string' ? error.body.error.message.toLowerCase() : '';
+
+  return message.includes('only supported in v1/responses') || bodyMessage.includes('v1/responses');
+}
+
 async function callOpenAi(prompt, spec) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
+  const responsesRequest = {
+    url: 'https://api.openai.com/v1/responses',
+    body: buildResponsesBody(prompt, spec),
+    controller,
+  };
+
+  const chatRequest = {
+    url: 'https://api.openai.com/v1/chat/completions',
+    body: buildChatBody(prompt, spec),
+    controller,
+  };
+
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.openAi.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: spec.id,
-        messages: [
-          { role: 'system', content: STRATEGY_SYSTEM_PROMPT },
-          { role: 'user', content: prompt },
-        ],
-        max_completion_tokens: spec.maxOutputTokens,
-        metadata: {
-          application: 'zenith-trader',
-          intent: 'strategy',
-        },
-      }),
-      signal: controller.signal,
-    });
-
-    const raw = await response.text();
     let data;
+
     try {
-      data = raw.length > 0 ? JSON.parse(raw) : {};
+      data = await performOpenAiRequest(responsesRequest);
     } catch (error) {
-      const parseError = new Error('Failed to parse OpenAI response payload');
-      parseError.cause = error;
-      parseError.body = raw;
-      throw parseError;
+      if (shouldFallbackToChat(error)) {
+        data = await performOpenAiRequest(chatRequest);
+      } else {
+        throw error;
+      }
     }
 
-    if (!response.ok) {
-      const message =
-        typeof data?.error?.message === 'string'
-          ? `OpenAI responded with status ${response.status}: ${data.error.message}`
-          : `OpenAI responded with status ${response.status}`;
-      const error = new Error(message);
-      error.body = data;
-      throw error;
-    }
-
-    const firstOutput = Array.isArray(data?.output) ? data.output[0] : undefined;
-    const finishReason = firstOutput?.finish_reason ?? firstOutput?.metadata?.finish_reason;
+    const finishReason = extractFinishReason(data);
     const usage = extractUsage(data, spec.id, finishReason);
     const payload = extractPayload(data);
 
@@ -348,6 +443,30 @@ async function callOpenAi(prompt, spec) {
 
     return { payload, usage };
   } catch (error) {
+    if (shouldFallbackToResponses(error)) {
+      try {
+        const data = await performOpenAiRequest(responsesRequest);
+        const finishReason = extractFinishReason(data);
+        const usage = extractUsage(data, spec.id, finishReason);
+        const payload = extractPayload(data);
+
+        if (payload === undefined) {
+          const missingError = new Error('OpenAI response did not include strategy content');
+          missingError.body = data;
+          throw missingError;
+        }
+
+        return { payload, usage };
+      } catch (fallbackError) {
+        if (fallbackError.name === 'AbortError') {
+          const timeoutError = new Error(`OpenAI request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+          timeoutError.cause = fallbackError;
+          throw timeoutError;
+        }
+        throw fallbackError;
+      }
+    }
+
     if (error.name === 'AbortError') {
       const timeoutError = new Error(`OpenAI request timed out after ${REQUEST_TIMEOUT_MS}ms`);
       timeoutError.cause = error;
