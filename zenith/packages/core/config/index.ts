@@ -40,6 +40,11 @@ export default {
     repriceDelayMs: { base: 60, step: 20 },
     cooldownMs: 60_000,
     cooldownWindowMs: 120_000,
+    interest: {
+      staleSec: 600,
+      boostPerZ: 0.02,
+      minScore: 2.0,
+    },
   },
   sessions: { weights: { ASIA:0.8, LONDON:1.0, NY:1.2, BRIDGE:0.9 } },
   nswCaps: { spreadHigh: 2.0, slipHigh: 2.5 },

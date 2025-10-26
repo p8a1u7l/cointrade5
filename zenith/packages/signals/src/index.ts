@@ -16,6 +16,59 @@ type Side = "LONG" | "SHORT";
 
 type CloseReason = "STOP" | "TARGET" | "TIME";
 
+type InterestEntry = {
+  symbol: string;
+  tradingSymbol?: string;
+  score: number;
+  z?: number;
+  updatedAt: number;
+};
+
+const interestHot = new Map<string, InterestEntry>();
+
+export function updateInterestHotlist(entries: InterestEntry[]): void {
+  interestHot.clear();
+  if (!Array.isArray(entries)) {
+    return;
+  }
+  for (const raw of entries) {
+    const score = Number(raw?.score);
+    if (!Number.isFinite(score)) {
+      continue;
+    }
+    const updatedAt = Number(raw?.updatedAt ?? Date.now());
+    const base = typeof raw?.symbol === "string" ? raw.symbol.toUpperCase() : undefined;
+    const trading = typeof raw?.tradingSymbol === "string" ? raw.tradingSymbol.toUpperCase() : undefined;
+    const z = Number.isFinite(Number(raw?.z)) ? Number(raw?.z) : score;
+    const normalized: InterestEntry = {
+      symbol: base ?? trading ?? "",
+      tradingSymbol: trading,
+      score,
+      z,
+      updatedAt,
+    };
+    if (!normalized.symbol) {
+      continue;
+    }
+    interestHot.set(normalized.symbol, normalized);
+    if (trading && trading !== normalized.symbol) {
+      interestHot.set(trading, normalized);
+    }
+  }
+}
+
+function resolveInterestEntry(symbol: string): InterestEntry | undefined {
+  if (!symbol) {
+    return undefined;
+  }
+  const direct = interestHot.get(symbol.toUpperCase());
+  if (direct) {
+    return direct;
+  }
+  const stripped = symbol.toUpperCase().replace(/(USDT|USDC|USD)$/i, "");
+  return interestHot.get(stripped);
+}
+
 interface ActivePosition {
   side: Side;
   qty: number;
@@ -125,6 +178,7 @@ export async function loop(ex: IExchange, symbol: string) {
   const snapshot: FeatureSnapshot = await getFeatures(symbol);
   const dl = await callDl(symbol, snapshot);
   const nsw = await callNSW(symbol);
+  const interest = resolveInterestEntry(symbol);
 
   const last = snapshot.liveLast();
   const active = activePositions.get(symbol);
@@ -201,7 +255,7 @@ export async function loop(ex: IExchange, symbol: string) {
     return;
   }
 
-  const candidates = buildCandidates(snapshot, dl, nsw);
+  const candidates = buildCandidates(snapshot, dl, nsw, { interest });
   const decision = await decideWithPolicy({ features: snapshot, dl, nsw, candidates });
 
   const best = decision.candidates.find((c) => {

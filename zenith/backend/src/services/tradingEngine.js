@@ -8,7 +8,8 @@ import { TypedEventEmitter } from '../utils/eventEmitter.js';
 import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
 import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
-import { runScalpLoop } from './scalpSignals.js';
+import { runScalpLoop, updateScalpInterest } from './scalpSignals.js';
+import { getInterestHotlist } from './interestHotlist.js';
 
 const BASE_ORDER_NOTIONAL = 40;
 const DEFAULT_CONFIDENCE_GUESS = 0.75;
@@ -109,6 +110,7 @@ export class TradingEngine extends TypedEventEmitter {
     );
     this.activeSymbols = [...this.baseSymbols];
     this.cachedTopMovers = [];
+    this.cachedInterestHot = { updatedAt: 0, entries: [], totals: [] };
     this.lastSymbolRefresh = 0;
     this.riskLevel = 3;
     this.leverageRange = {
@@ -154,8 +156,38 @@ export class TradingEngine extends TypedEventEmitter {
     return [...this.cachedTopMovers];
   }
 
+  getInterestHotlistSnapshot() {
+    const snapshot = this.cachedInterestHot ?? { entries: [], totals: [], updatedAt: 0 };
+    return {
+      updatedAt: snapshot.updatedAt ?? 0,
+      entries: Array.isArray(snapshot.entries) ? [...snapshot.entries] : [],
+      totals: Array.isArray(snapshot.totals) ? [...snapshot.totals] : [],
+    };
+  }
+
   invalidatePositionCache() {
     this.positionCache = { timestamp: 0, map: new Map() };
+  }
+
+  async refreshInterestHotlist(force = false) {
+    if (!config.interestWatcher || config.interestWatcher.enabled === false) {
+      return this.cachedInterestHot;
+    }
+    try {
+      const payload = await getInterestHotlist({ force });
+      this.cachedInterestHot = payload;
+      if (this.strategyMode === 'scalp') {
+        try {
+          await updateScalpInterest(payload.entries ?? []);
+        } catch (error) {
+          logger.warn({ error }, 'Unable to pass interest hotlist to scalping module');
+        }
+      }
+      return payload;
+    } catch (error) {
+      logger.warn({ error }, 'Failed to refresh interest hotlist');
+      return this.cachedInterestHot;
+    }
   }
 
   invalidateBalanceCache() {
@@ -287,8 +319,22 @@ export class TradingEngine extends TypedEventEmitter {
         logger.error({ error }, 'Failed to validate base Binance symbols');
       }
     }
+
+    const interestSnapshot = await this.refreshInterestHotlist(options.force === true);
+    const interestSymbols = Array.isArray(interestSnapshot?.entries)
+      ? interestSnapshot.entries
+          .map((entry) => String(entry?.tradingSymbol ?? '').toUpperCase())
+          .filter((symbol) => VALID_SYMBOL_REGEX.test(symbol))
+      : [];
+
     if (!enabled) {
-      this._updateActiveSymbols(this.baseSymbols);
+      const merged = Array.from(
+        new Set([
+          ...interestSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
+          ...this.baseSymbols,
+        ])
+      );
+      this._updateActiveSymbols(merged);
       return { symbols: this.getActiveSymbols(), movers: [] };
     }
 
@@ -296,6 +342,15 @@ export class TradingEngine extends TypedEventEmitter {
     const intervalMs = Math.max(30_000, Number(discovery.refreshIntervalSeconds ?? 180) * 1000);
     const force = options.force === true;
     if (!force && now - this.lastSymbolRefresh < intervalMs) {
+      if (interestSymbols.length > 0) {
+        const merged = Array.from(
+          new Set([
+            ...interestSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
+            ...this.activeSymbols,
+          ])
+        );
+        this._updateActiveSymbols(merged);
+      }
       return { symbols: this.getActiveSymbols(), movers: this.getTopMovers() };
     }
 
@@ -344,8 +399,9 @@ export class TradingEngine extends TypedEventEmitter {
         addBaseSymbol(symbol);
       }
 
+      const prioritizedInterest = interestSymbols.filter((symbol) => !blocked.has(symbol));
       const limitedDynamics = dynamicCandidates.slice(0, dynamicQuota > 0 ? dynamicQuota : routeLimit);
-      const nextSymbols = Array.from(new Set([...trimmedBase, ...limitedDynamics]));
+      const nextSymbols = Array.from(new Set([...prioritizedInterest, ...trimmedBase, ...limitedDynamics]));
       if (nextSymbols.length > configuredMax) {
         nextSymbols.length = configuredMax;
       }

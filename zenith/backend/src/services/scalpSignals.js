@@ -31,3 +31,10 @@ export async function getScalpRealized(symbol) {
   const mod = await loadSignalsModule();
   return mod.getRealizedPnl(symbol);
 }
+
+export async function updateScalpInterest(entries) {
+  const mod = await loadSignalsModule();
+  if (typeof mod.updateInterestHotlist === 'function') {
+    mod.updateInterestHotlist(entries ?? []);
+  }
+}

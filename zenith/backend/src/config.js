@@ -1,3 +1,5 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { loadEnvFile } from './utils/env.js';
 
 loadEnvFile();
@@ -49,6 +51,19 @@ const parseList = (value, fallback) => {
 };
 
 const strategyMode = parseStrategyMode(process.env.STRATEGY_MODE);
+
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(moduleDir, '../../..');
+const defaultInterestRoot = path.resolve(repoRoot, 'interest-trend-watcher');
+
+const resolvePath = (value, fallback) => {
+  const source = value && value.trim().length > 0 ? value : fallback;
+  if (!source) return undefined;
+  if (path.isAbsolute(source)) {
+    return source;
+  }
+  return path.resolve(repoRoot, source);
+};
 
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -114,4 +129,29 @@ export const config = {
   logging: {
     level: process.env.LOG_LEVEL ?? 'info',
   },
+  interestWatcher: (() => {
+    const enabled = (process.env.INTEREST_WATCHER_ENABLED ?? 'true') === 'true';
+    const projectDir = resolvePath(
+      process.env.INTEREST_WATCHER_PROJECT_DIR,
+      defaultInterestRoot
+    );
+    const dataDir = resolvePath(
+      process.env.INTEREST_WATCHER_DATA_DIR,
+      projectDir ? path.join(projectDir, 'news_interest') : undefined
+    );
+    const stateDir = resolvePath(
+      process.env.INTEREST_WATCHER_STATE_DIR,
+      projectDir ? path.join(projectDir, '.interest_state') : undefined
+    );
+    return {
+      enabled,
+      projectDir,
+      dataDir,
+      stateDir,
+      staleMs: parseNumber(process.env.INTEREST_WATCHER_STALE_MS, 5 * 60 * 1000),
+      minScore: parseFloat(process.env.INTEREST_WATCHER_MIN_SCORE ?? '2.0'),
+      quoteAsset: (process.env.INTEREST_WATCHER_QUOTE_ASSET ?? 'USDT').toUpperCase(),
+      maxSymbols: parseNumber(process.env.INTEREST_WATCHER_MAX_SYMBOLS, 8),
+    };
+  })(),
 };

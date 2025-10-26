@@ -91,7 +91,14 @@ function regimeOk(features: Features, side: Side): boolean {
   return (ema25<ema50 && ema50<ema100 && close<ema25);
 }
 
-export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Candidate[] {
+type InterestContext = { score?: number; z?: number; updatedAt: number };
+type CandidateExtras = { interest?: InterestContext };
+
+function formatNumber(value: number | undefined, digits = 2): string {
+  return Number.isFinite(value) ? (value as number).toFixed(digits) : "na";
+}
+
+export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut, extras: CandidateExtras = {}): Candidate[] {
   const now = Date.now();
   const out: Candidate[] = [];
   const atr = features.atr22;
@@ -117,6 +124,25 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
   };
 
   const price = features.close;
+
+  const interestCfg = cfg.scalp?.interest ?? {};
+  const interest = extras.interest;
+  const interestScore = Number.isFinite(interest?.score) ? (interest?.score as number) : undefined;
+  const interestZ = Number.isFinite(interest?.z) ? (interest?.z as number) : interestScore;
+  const interestAgeSec = interest ? Math.max(0, (Date.now() - interest.updatedAt) / 1000) : undefined;
+  const interestFresh =
+    interestAgeSec !== undefined && interestAgeSec <= (interestCfg.staleSec ?? 600);
+  const boostEligible =
+    interestFresh && interestScore !== undefined && interestScore >= (interestCfg.minScore ?? 2);
+  const boost = boostEligible && interestZ !== undefined
+    ? Math.min(0.08, interestZ * (interestCfg.boostPerZ ?? 0.02))
+    : 0;
+  const interestReason = interest
+    ? `interest.z=${formatNumber(interestZ)} age=${
+        interestAgeSec !== undefined ? Math.round(interestAgeSec) : "na"
+      }s boost=${formatNumber(boost)}`
+    : "interest=none";
+  const applyInterest = (quality: number) => Math.min(1, quality + (boostEligible ? boost : 0));
 
   // ─────────────────────────────────────────
   // 전략 A: Breakout Momentum (Scalp)
@@ -152,6 +178,7 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
         nsw,
       });
       q = Math.min(1, q);
+      const quality = applyInterest(q);
 
       const expectedSlip = dl.slipBp ?? (spreadBp * 0.6);
       const microOk = !sessionRestricted && microFiltersOk({
@@ -170,9 +197,9 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
       const tpPlan = { tp1RR: cfg.rrTargets.model1[0] ?? 1.7, tp2RR: undefined, target: "next_va" as const };
 
       out.push({
-        signal: microOk && signalFresh && q >= threshold ? side : "NONE",
+        signal: microOk && signalFresh && quality >= threshold ? side : "NONE",
         model: "BREAKOUT",
-        quality: q,
+        quality,
         entryHint,
         stopHint,
         tpPlan,
@@ -186,6 +213,7 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
           `signalFresh=${signalFreshSec.toFixed(1)}s`,
           `microOk=${microOk}`,
           `distanceATR=${distance.toFixed(2)}`,
+          interestReason,
         ],
       });
     }
@@ -220,6 +248,7 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
     if (fvg.ok) {
       q = Math.min(1, q + 0.05);
     }
+    const quality = applyInterest(q);
 
     const expectedSlip = dl.slipBp ?? (spreadBp * 0.6);
     const microOk = !sessionRestricted && microFiltersOk({
@@ -235,9 +264,9 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
     const threshold = strategyQualityThreshold("MEAN");
 
     out.push({
-      signal: microOk && signalFresh && q >= threshold ? side : "NONE",
+      signal: microOk && signalFresh && quality >= threshold ? side : "NONE",
       model: "MEAN",
-      quality: q,
+      quality,
       entryHint: { level: leftVAUp ? "vah" : "val" },
       stopHint: { type: "swing", distanceTick: Math.max(2, distanceTicks(atr*0.6, tick)) },
       tpPlan: { tp1RR: cfg.rrTargets.model2[0] ?? 1.55, tp2RR: undefined, target: "poc" },
@@ -250,6 +279,7 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
         `patterns=${pc.names.join(",")||"none"}`,
         `signalFresh=${signalFreshSec.toFixed(1)}s`,
         `microOk=${microOk}`,
+        interestReason,
       ]
     });
   }
@@ -299,10 +329,12 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
 
       const threshold = strategyQualityThreshold("EMA50");
 
+      const quality = applyInterest(q);
+
       out.push({
-        signal: microOk && signalFresh && q >= threshold ? side : "NONE",
+        signal: microOk && signalFresh && quality >= threshold ? side : "NONE",
         model: "EMA50",
-        quality: q,
+        quality,
         entryHint: { level: "ema50" },
         stopHint: { type: "swing", distanceTick: Math.max(2, distanceTicks(atr*0.6, tick)) },
         tpPlan: { tp1RR: cfg.rrTargets.model3[0] ?? 1.65, tp2RR: undefined, target: "next_va" },
@@ -316,6 +348,7 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
           `swingBreak=${swingBreak}`,
           `signalFresh=${signalFreshSec.toFixed(1)}s`,
           `microOk=${microOk}`,
+          interestReason,
         ]
       });
     }
@@ -327,7 +360,7 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
       entryHint:{level:"ema50"}, stopHint:{type:"swing", distanceTick:0},
       tpPlan:{tp1RR:1, target:"na"},
       micro:{spreadBp, latencyMs, quoteAgeMs, depthBias:1},
-      reasons:[sessionRestricted?"nsw restricted":"no candidate"],
+      reasons:[sessionRestricted?"nsw restricted":"no candidate", interestReason],
     });
   }
   return out;
