@@ -1,0 +1,5 @@
+node_modules/
+dist/
+news_interest/
+.interest_state/
+.env

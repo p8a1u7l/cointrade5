@@ -1,0 +1,21 @@
+{
+  "name": "interest-trend-watcher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "run": "node dist/cli.js run",
+    "dump": "node dist/cli.js dump",
+    "test:tokenize": "node dist/cli.js test-tokenize"
+  },
+  "dependencies": {
+    "axios": "^1.7.4",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "typescript": "^5.6.3"
+  }
+}
