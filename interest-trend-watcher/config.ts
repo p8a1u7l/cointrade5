@@ -13,5 +13,15 @@ export const CFG = {
     timeoutMs: parseInt(process.env.TIMEOUT_MS ?? "8000", 10),
     retry: parseInt(process.env.RETRY ?? "3", 10),
     pauseMs: parseInt(process.env.PAUSE_MS ?? "300", 10)
+  },
+  reddit: {
+    subs: (process.env.REDDIT_SUBS ?? "Cryptocurrency,BitcoinMarkets,ethtrader")
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean),
+    limit: Math.max(1, parseInt(process.env.REDDIT_LIMIT ?? "25", 10)),
+    sort: (process.env.REDDIT_SORT ?? "new").toLowerCase(),
+    pauseMs: Math.max(0, parseInt(process.env.REDDIT_PAUSE_MS ?? "500", 10)),
+    userAgent: process.env.REDDIT_USER_AGENT ?? "script:interest-trend-watcher:1.0 (by /u/interestwatcher)"
   }
 } as const;
