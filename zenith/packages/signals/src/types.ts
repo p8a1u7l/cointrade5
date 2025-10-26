@@ -33,7 +33,7 @@ export const CandidateSchema = z.object({
   signal: z.enum(["LONG","SHORT","NONE"]),
   model: z.enum(["BREAKOUT","MEAN","EMA50","NONE"]),
   quality: z.number().min(0).max(1),
-  entryHint: z.object({ level: z.enum(["lvn","vah","val","ema25","ema50","fvg_edge"]) }),
+  entryHint: z.object({ level: z.enum(["lvn","vah","val","ema25","ema50","fvg_edge","poc","next_va","na"]) }),
   stopHint: z.object({ type: z.enum(["swing","chandelier"]), distanceTick: z.number().int().nonnegative() }),
   tpPlan: z.object({ tp1RR: z.number().positive(), tp2RR: z.number().positive().optional(), target: z.enum(["poc","next_va","na"]) }),
   micro: z.object({

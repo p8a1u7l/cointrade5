@@ -32,5 +32,8 @@ export const Features = z.object({
   availableUSDT: z.number().default(1000),
   session: z.enum(["ASIA","LONDON","NY","BRIDGE"]),
   regime: z.enum(["BULLISH","BEARISH","RANGE"]),
+  candleAgeSec: z.number().optional(),
+  signalAgeSec: z.number().optional(),
+  trades: z.array(Trade).optional(),
 }).strict();
 export type Features = z.infer<typeof Features>;

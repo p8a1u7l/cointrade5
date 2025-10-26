@@ -27,9 +27,19 @@ export function pickNearestEntryLevel(f: Features, fvg?:{from:number;to:number})
     {k:"ema50", v: f.ema50},
     ...(fvg?[{k:"fvg_edge", v:(fvg.from+fvg.to)/2} as any]:[])
   ].filter(x=>!Number.isNaN(x.v));
-  let best = candidates[0];
+  let best = candidates[0] ?? {k:"ema50", v:f.ema50};
   for (const c of candidates) {
     if (Math.abs(f.close-c.v) < Math.abs(f.close-best.v)) best = c;
   }
   return best.k as "lvn"|"vah"|"val"|"ema25"|"ema50"|"fvg_edge";
+}
+
+export function retracedWithinBars(level:number, features: Features, bars=2): boolean {
+  const recent = features.candles.slice(-Math.max(1, bars));
+  return recent.some(c => c.low<=level && c.high>=level);
+}
+
+export function candleDistanceFrom(price:number, level:number, atr:number): number {
+  if (atr <= 0) return Number.POSITIVE_INFINITY;
+  return Math.abs(price - level) / atr;
 }

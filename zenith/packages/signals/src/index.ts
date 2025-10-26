@@ -4,11 +4,17 @@ import { buildExitPlan, updateStops, type ExitPlan } from "@repo/risk/plan";
 import { closePosition, routeOrder } from "@repo/executor/router";
 import { callDl } from "@repo/models-dl/client";
 import { callNSW } from "@repo/models-llm/nsw";
-import { getFeatures, type FeatureSnapshot } from "./features"; // 이미 구현된 피처 빌더
+import { getFeatures, type FeatureSnapshot } from "./features";
 import cfg from "@repo/core/config";
 import { IExchange } from "@repo/exchange-binance";
+import { computeSignalFreshSec, CooldownTracker, shouldForceFlat } from "./scalpGuards";
+import { strategyQualityThreshold } from "./quality";
+
+const SLIP_CAP = cfg.scalp?.slippageBpCap ?? cfg.microFilters.slippageBp;
 
 type Side = "LONG" | "SHORT";
+
+type CloseReason = "STOP" | "TARGET" | "TIME";
 
 interface ActivePosition {
   side: Side;
@@ -16,12 +22,19 @@ interface ActivePosition {
   entryPrice: number;
   plan: ExitPlan;
   hitTP1: boolean;
+  enterTs: number;
+  firstFillTs: number;
+  entryBarTs: number;
+  barsHeld: number;
+  signalFreshSec: number;
+  microOk: boolean;
 }
 
 const POSITION_EPSILON = 1e-6;
 
 const activePositions = new Map<string, ActivePosition>();
 const realizedLedger = new Map<string, number>();
+const cooldowns = new CooldownTracker();
 
 function recordRealized(symbol: string, delta: number): void {
   const current = realizedLedger.get(symbol) ?? 0;
@@ -47,7 +60,8 @@ async function closeAtPrice(
   position: ActivePosition,
   quantity: number,
   orderPrice: number,
-  priceHint: number
+  priceHint: number,
+  reason: CloseReason
 ): Promise<{ realized: number; filled: number } | null> {
   if (!Number.isFinite(quantity) || quantity <= POSITION_EPSILON) {
     return null;
@@ -59,6 +73,9 @@ async function closeAtPrice(
   }
   const report = await closePosition(ex, { symbol, side: orderSide, qty: quantity, price });
   if (!report.accepted) {
+    if (report.reason === "slippage above cap") {
+      cooldowns.register(symbol, "slip");
+    }
     return null;
   }
   const filledQty = Number.isFinite(report.filledQty) && (report.filledQty ?? 0) > 0
@@ -67,6 +84,12 @@ async function closeAtPrice(
   const exitPrice = pickEntryPrice(report.avgPrice, priceHint ?? price);
   const realized = computeRealizedPnl(position, exitPrice, filledQty);
   recordRealized(symbol, realized);
+  if (reason === "STOP") {
+    cooldowns.register(symbol, "stop");
+  }
+  if (report.slipBp !== undefined && report.slipBp > SLIP_CAP) {
+    cooldowns.register(symbol, "slip");
+  }
   return { realized, filled: filledQty };
 }
 
@@ -85,6 +108,10 @@ function targetHit(position: ActivePosition, target: number | undefined, last: R
     return last.high >= (target as number);
   }
   return last.low <= (target as number);
+}
+
+function barsSinceEntry(snapshot: FeatureSnapshot, entryBarTs: number): number {
+  return snapshot.candles.filter((c) => c.ts >= entryBarTs).length;
 }
 
 export function getRealizedPnl(symbol?: string): number | Map<string, number> {
@@ -115,10 +142,26 @@ export async function loop(ex: IExchange, symbol: string) {
     });
     active.plan.sl = updatedStop;
 
+    const holdSec = (Date.now() - active.firstFillTs) / 1000;
+    active.barsHeld = barsSinceEntry(snapshot, active.entryBarTs);
+
+    if (holdSec >= (cfg.scalp?.maxHoldSec ?? active.plan.maxHoldSec) - 30 && holdSec < active.plan.maxHoldSec) {
+      console.warn(`[scalp] ${symbol} holdSec=${holdSec.toFixed(1)} nearing cap ${active.plan.maxHoldSec}`);
+    }
+
+    if (shouldForceFlat({ holdSec, barsHeld: active.barsHeld, maxHoldSec: active.plan.maxHoldSec, maxBars: active.plan.maxBars })) {
+      const priceHint = active.side === "LONG" ? last.close : last.close;
+      const result = await closeAtPrice(ex, symbol, active, active.qty, last.close, priceHint, "TIME");
+      if (result) {
+        activePositions.delete(symbol);
+      }
+      return;
+    }
+
     if (stopTriggered(active, last)) {
       const stopPrice = active.plan.sl;
       const priceHint = Number.isFinite(stopPrice) ? stopPrice : last.close;
-      const result = await closeAtPrice(ex, symbol, active, active.qty, stopPrice, priceHint);
+      const result = await closeAtPrice(ex, symbol, active, active.qty, stopPrice, priceHint, "STOP");
       if (result) {
         activePositions.delete(symbol);
       }
@@ -129,7 +172,7 @@ export async function loop(ex: IExchange, symbol: string) {
     if (tp1Reached) {
       const partialQty = Math.max(1, Math.floor(active.qty / 2));
       const tp1Price = active.plan.tp1 as number;
-      const result = await closeAtPrice(ex, symbol, active, partialQty, tp1Price, tp1Price);
+      const result = await closeAtPrice(ex, symbol, active, partialQty, tp1Price, tp1Price, "TARGET");
       if (result) {
         active.qty = Math.max(0, active.qty - result.filled);
         active.hitTP1 = true;
@@ -140,7 +183,7 @@ export async function loop(ex: IExchange, symbol: string) {
     const tp2Target = active.plan.tp2 ?? active.plan.tp1;
     if (targetHit(active, tp2Target, last)) {
       const targetPrice = tp2Target ?? last.close;
-      const result = await closeAtPrice(ex, symbol, active, active.qty, targetPrice, targetPrice ?? last.close);
+      const result = await closeAtPrice(ex, symbol, active, active.qty, targetPrice, targetPrice ?? last.close, "TARGET");
       if (result) {
         activePositions.delete(symbol);
       }
@@ -153,10 +196,18 @@ export async function loop(ex: IExchange, symbol: string) {
     return;
   }
 
+  if (cooldowns.isBlocked(symbol)) {
+    return;
+  }
+
   const candidates = buildCandidates(snapshot, dl, nsw);
   const decision = await decideWithPolicy({ features: snapshot, dl, nsw, candidates });
 
-  const best = decision.candidates.find((c) => c.signal !== "NONE" && c.quality >= cfg.qualityThreshold);
+  const best = decision.candidates.find((c) => {
+    if (c.signal === "NONE") return false;
+    const threshold = strategyQualityThreshold(c.model);
+    return c.quality >= threshold;
+  });
   if (!best) return;
 
   const side: Side = best.signal === "LONG" ? "LONG" : "SHORT";
@@ -167,17 +218,31 @@ export async function loop(ex: IExchange, symbol: string) {
 
   const forbidMkt = nsw.policy.forbidMarket;
   const limitPx = orderSide === "BUY" ? entryRef - snapshot.tickSize : entryRef + snapshot.tickSize;
+  const signalAgeSec = snapshot.signalAgeSec ?? computeSignalFreshSec(snapshot.ts);
 
   const report = await routeOrder(ex, {
     symbol,
     side: orderSide,
     qty,
     limitPrice: limitPx,
-    maxReprices: 4,
+    maxReprices: cfg.scalp?.repriceAttempts ?? 3,
     forbidMarket: forbidMkt,
+    signalAgeSec,
+    micro: {
+      spreadBp: snapshot.micro.spreadBp,
+      expectedSlipBp: dl.slipBp ?? snapshot.micro.spreadBp * 0.6,
+      latencyMs: snapshot.micro.latencyMs,
+      quoteAgeMs: snapshot.micro.quoteAgeMs,
+      depthBias: side === "LONG"
+        ? snapshot.micro.bidQty10 / Math.max(1, snapshot.micro.askQty10)
+        : Math.max(1, snapshot.micro.askQty10) / Math.max(1, snapshot.micro.bidQty10),
+    },
   });
 
   if (!report.accepted) {
+    if (report.reason === "slippage above cap") {
+      cooldowns.register(symbol, "slip");
+    }
     return;
   }
 
@@ -191,5 +256,15 @@ export async function loop(ex: IExchange, symbol: string) {
     entryPrice,
     plan,
     hitTP1: false,
+    enterTs: Date.now(),
+    firstFillTs: Date.now(),
+    entryBarTs: snapshot.candles.at(-1)?.ts ?? snapshot.ts,
+    barsHeld: 0,
+    signalFreshSec: signalAgeSec,
+    microOk: true,
   });
+
+  if (report.slipBp !== undefined && report.slipBp > SLIP_CAP) {
+    cooldowns.register(symbol, "slip");
+  }
 }

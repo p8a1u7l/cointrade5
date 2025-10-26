@@ -1,7 +1,21 @@
 import { clamp } from "@repo/core/math";
 import { sessionOf } from "@repo/core/micro";
-import { NswOut } from "./types";
+import { NswOut, Candidate } from "./types";
 import cfg from "@repo/core/config"; // engine.yml 로딩 래퍼
+
+export function strategyQualityThreshold(model: Candidate["model"]): number {
+  const map = cfg.scalp?.qualityThresholds ?? {};
+  switch (model) {
+    case "BREAKOUT":
+      return map.BREAKOUT ?? 0.75;
+    case "MEAN":
+      return map.MEAN ?? 0.70;
+    case "EMA50":
+      return map.EMA50 ?? 0.72;
+    default:
+      return cfg.qualityThreshold ?? 0.7;
+  }
+}
 
 export function calcQualityScore(params: {
   regimeOk: boolean;
@@ -32,6 +46,10 @@ export function calcQualityScore(params: {
   const weights = cfg.sessions.weights; // {ASIA:0.8,...}
   base *= (weights[sess] ?? 1);
 
+  if ((sess === "NY" || sess === "BRIDGE") && (nsw.grade === "High" || nsw.grade === "Critical")) {
+    return 0;
+  }
+
   if (nsw.grade === "High") base *= 0.8;
   if (nsw.grade === "Critical") base *= 0.7;
 
@@ -52,14 +70,18 @@ export function microFiltersOk(m: {
     caps.spreadBp = Math.min(caps.spreadBp, cfg.nswCaps?.spreadHigh ?? 2.0);
     caps.slippageBp = Math.min(caps.slippageBp, cfg.nswCaps?.slipHigh ?? 2.5);
   }
-  const depthThreshold = m.side === "LONG"
-    ? (caps.depthBiasLong ?? 0.8)
-    : (caps.depthBiasShort ?? caps.depthBiasLong ?? 0.8);
+  const depthBaseline = cfg.scalp?.depthBias?.[m.side] ?? (m.side === "LONG"
+    ? (caps.depthBiasLong ?? 0.9)
+    : (caps.depthBiasShort ?? caps.depthBiasLong ?? 0.9));
+  const spreadCap = Math.min(caps.spreadBp, cfg.scalp?.spreadBpCap ?? caps.spreadBp);
+  const slipCap = Math.min(caps.slippageBp, cfg.scalp?.slippageBpCap ?? caps.slippageBp);
+  const latencyCap = Math.min(caps.latencyMs, cfg.scalp?.latencyMs ?? caps.latencyMs);
+  const quoteAgeCap = Math.min(caps.quoteAgeMs, cfg.scalp?.quoteAgeMs ?? caps.quoteAgeMs);
   return (
-    m.spreadBp <= caps.spreadBp &&
-    m.expectedSlipBp <= caps.slippageBp &&
-    m.latencyMs <= caps.latencyMs &&
-    m.quoteAgeMs <= caps.quoteAgeMs &&
-    m.depthBias >= depthThreshold // 호출 측에서 방향에 맞게 세팅
+    m.spreadBp <= spreadCap &&
+    m.expectedSlipBp <= slipCap &&
+    m.latencyMs <= latencyCap &&
+    m.quoteAgeMs <= quoteAgeCap &&
+    m.depthBias >= depthBaseline
   );
 }
