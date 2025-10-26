@@ -9,14 +9,25 @@ export async function fetchCryptoPanic(): Promise<Item[]> {
   const url = `https://cryptopanic.com/api/v1/posts/?auth_token=${CFG.cryptopanicToken}&filter=important`;
   const data = await getJson<CPResp>(url);
   const rows = data.results ?? [];
-  return rows.map((r:any)=>({
-    id: String(r.id),
-    title: r.title ?? "",
-    url: r.url ?? "",
-    timestamp: Date.parse(r.published_at ?? r.created_at ?? new Date().toISOString()),
-    source: "cryptopanic",
-    author: r.domain ?? "",
-    symbols: r.currencies?.map((c:any)=>c.code) ?? [],
-    body: r.body ?? undefined
-  }));
+  const items: Item[] = [];
+  for (const row of rows) {
+    const tsRaw = row?.published_at ?? row?.created_at;
+    const ts = typeof tsRaw === "string" ? Date.parse(tsRaw) : NaN;
+    if (!Number.isFinite(ts)) continue;
+
+    const url = typeof row?.url === "string" && row.url.length ? row.url : undefined;
+    if (!url) continue;
+
+    items.push({
+      id: String(row.id ?? `${url}:${ts}`),
+      title: typeof row?.title === "string" ? row.title : "",
+      url,
+      timestamp: ts,
+      source: "cryptopanic",
+      author: typeof row?.domain === "string" ? row.domain : undefined,
+      symbols: Array.isArray(row?.currencies) ? row.currencies.map((c: any) => c?.code).filter(Boolean) : [],
+      body: typeof row?.body === "string" && row.body.length ? row.body : undefined,
+    });
+  }
+  return items;
 }

@@ -38,9 +38,10 @@ export async function fetchReddit(): Promise<Item[]> {
         if (typeof data.created_utc !== "number") continue;
         const ts = Math.round(data.created_utc * 1000);
         const permalink = typeof data.permalink === "string" ? data.permalink : "";
-        const targetUrl = typeof data.url === "string" && data.url.length
+        const targetUrl = typeof data.url === "string" && data.url.startsWith("http")
           ? data.url
-          : `https://reddit.com${permalink}`;
+          : (permalink ? `https://reddit.com${permalink}` : undefined);
+        if (!targetUrl) continue;
         const flairText = typeof data.link_flair_text === "string" && data.link_flair_text.length
           ? [data.link_flair_text]
           : undefined;
@@ -51,15 +52,18 @@ export async function fetchReddit(): Promise<Item[]> {
           : [];
         const symbolTags = richFlair.length ? richFlair : flairText;
 
+        const title = typeof data.title === "string" ? data.title : "";
+        if (!title) continue;
+
         items.push({
           id: `reddit:${data.id ?? `${sub}-${ts}`}`,
-          title: data.title ?? "",
+          title,
           url: targetUrl,
           timestamp: ts,
           source: `reddit:${sub}`,
           symbols: symbolTags && symbolTags.length ? symbolTags : undefined,
           body: typeof data.selftext === "string" && data.selftext.trim().length ? data.selftext : undefined,
-          author: typeof data.author === "string" ? data.author : undefined,
+          author: typeof data.author === "string" && data.author.length ? data.author : undefined,
         });
       }
     } catch (error: any) {
@@ -101,19 +105,29 @@ async function fetchCryptoPanicReddit(subs: string[]): Promise<Item[]> {
         return true;
       })
       .map((r: any) => {
-        const ts = Date.parse(r.published_at ?? r.created_at ?? new Date().toISOString());
+        const tsRaw = r?.published_at ?? r?.created_at;
+        const ts = typeof tsRaw === "string" ? Date.parse(tsRaw) : NaN;
+        if (!Number.isFinite(ts)) return undefined;
         const subreddit = typeof r?.metadata?.subreddit === "string" ? r.metadata.subreddit : undefined;
+        const url = typeof r?.url === "string" && r.url.startsWith("http") ? r.url : undefined;
+        const title = typeof r?.title === "string" ? r.title : undefined;
+        if (!url || !title) return undefined;
+        const body = typeof r?.body === "string" && r.body.length ? r.body : (typeof r?.metadata?.body === "string" && r.metadata.body.length ? r.metadata.body : undefined);
+        const author = typeof r?.metadata?.author === "string" && r.metadata.author.length
+          ? r.metadata.author
+          : (typeof r?.author === "string" && r.author.length ? r.author : undefined);
         return {
-          id: `reddit:cp:${r.id}`,
-          title: r.title ?? "",
-          url: r.url ?? "",
-          timestamp: Number.isFinite(ts) ? ts : Date.now(),
+          id: `reddit:cp:${r.id ?? `${url}:${ts}`}`,
+          title,
+          url,
+          timestamp: ts,
           source: `reddit:${subreddit ?? r.source ?? "cryptopanic"}`,
-          symbols: Array.isArray(r.currencies) ? r.currencies.map((c: any) => c?.code).filter(Boolean) : undefined,
-          body: r.body ?? r?.metadata?.body ?? undefined,
-          author: r.metadata?.author ?? r.author ?? undefined,
+          symbols: Array.isArray(r?.currencies) ? r.currencies.map((c: any) => c?.code).filter(Boolean) : undefined,
+          body,
+          author,
         } as Item;
-      });
+      })
+      .filter((v): v is Item => Boolean(v));
   } catch (error) {
     console.warn(`[reddit] CryptoPanic fallback failed: ${error instanceof Error ? error.message : String(error)}`);
     return [];
