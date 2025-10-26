@@ -116,6 +116,7 @@ export async function routeOrder(ex: IExchange, params:{
     side: params.side,
     type: "MARKET",
     quantity: params.qty,
+    price: params.limitPrice,
   });
   lastLatency = Date.now()-m0;
   const done = await waitFill(ex, params.symbol, mkt, 250);

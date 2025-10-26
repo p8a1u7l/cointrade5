@@ -9,6 +9,8 @@
     "strict": true,
     "skipLibCheck": true,
     "baseUrl": "./",
+    "rootDir": "./",
+    "outDir": "dist",
     "types": ["node"],
     "lib": ["es2022", "dom"],
     "paths": {

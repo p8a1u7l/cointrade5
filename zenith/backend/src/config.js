@@ -2,6 +2,14 @@ import { loadEnvFile } from './utils/env.js';
 
 loadEnvFile();
 
+const parseStrategyMode = (value) => {
+  const normalized = (value ?? 'scalp').toLowerCase();
+  if (normalized === 'scalp' || normalized === 'llm') {
+    return normalized;
+  }
+  return 'scalp';
+};
+
 const requireEnv = (name) => {
   const value = process.env[name];
   if (!value || value.trim().length === 0) {
@@ -40,6 +48,8 @@ const parseList = (value, fallback) => {
     .filter((entry) => entry.length > 0);
 };
 
+const strategyMode = parseStrategyMode(process.env.STRATEGY_MODE);
+
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: parseNumber(process.env.PORT, 8080),
@@ -59,9 +69,10 @@ export const config = {
     },
   },
   openAi: {
-    apiKey: requireEnv('OPENAI_API_KEY'),
+    apiKey: strategyMode === 'scalp' ? process.env.OPENAI_API_KEY ?? '' : requireEnv('OPENAI_API_KEY'),
   },
   trading: {
+    strategyMode,
     initialBalance: parseNumber(process.env.INITIAL_BALANCE, 100_000),
     loopIntervalSeconds: parseNumber(process.env.LOOP_INTERVAL_SECONDS, 30),
     maxPositionLeverage: parseNumber(process.env.MAX_POSITION_LEVERAGE, 5),

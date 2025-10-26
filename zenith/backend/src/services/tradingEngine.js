@@ -7,6 +7,8 @@ import { logger } from '../utils/logger.js';
 import { TypedEventEmitter } from '../utils/eventEmitter.js';
 import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
+import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
+import { runScalpLoop } from './scalpSignals.js';
 
 const BASE_ORDER_NOTIONAL = 40;
 const DEFAULT_CONFIDENCE_GUESS = 0.75;
@@ -122,6 +124,10 @@ export class TradingEngine extends TypedEventEmitter {
     this.running = false;
     this.loopTimer = undefined;
     this.binance = new BinanceClient();
+    this.strategyMode = config.trading.strategyMode ?? 'llm';
+    this.scalpExchange = this.strategyMode === 'scalp'
+      ? createBinanceExchangeAdapter(this.binance)
+      : null;
     this.recorder = new AnalyticsRecorder();
     this.stream = new BinanceRealtimeFeed();
     this.latestTicks = new Map();
@@ -476,7 +482,7 @@ export class TradingEngine extends TypedEventEmitter {
       this.running = true;
       this.scheduleNextLoop(0);
       this.emit('started');
-      logger.info({ symbols: this.getActiveSymbols() }, 'Trading engine started');
+      logger.info({ symbols: this.getActiveSymbols(), mode: this.strategyMode }, 'Trading engine started');
     } catch (error) {
       this.stream.stop();
       throw error;
@@ -527,12 +533,25 @@ export class TradingEngine extends TypedEventEmitter {
         await this.captureEquitySnapshot();
         return;
       }
-      for (const symbol of symbols) {
-        try {
-          const decision = await this.evaluateSymbol(symbol);
-          await this.executeDecision(decision);
-        } catch (error) {
-          logger.error({ error, symbol }, 'Failed to execute trading decision');
+      if (this.strategyMode === 'scalp') {
+        if (!this.scalpExchange) {
+          throw new Error('Scalping mode active but exchange adapter was not initialised');
+        }
+        for (const symbol of symbols) {
+          try {
+            await runScalpLoop(this.scalpExchange, symbol);
+          } catch (error) {
+            logger.error({ error, symbol }, 'Failed to run scalping loop');
+          }
+        }
+      } else {
+        for (const symbol of symbols) {
+          try {
+            const decision = await this.evaluateSymbol(symbol);
+            await this.executeDecision(decision);
+          } catch (error) {
+            logger.error({ error, symbol }, 'Failed to execute trading decision');
+          }
         }
       }
       await this.captureEquitySnapshot();
