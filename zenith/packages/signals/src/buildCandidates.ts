@@ -104,7 +104,7 @@ export function buildCandidates(features: Features, dl: DlOut, nsw: NswOut): Can
   const depthBiasShort = Math.max(1, features.micro.askQty10) / Math.max(1, features.micro.bidQty10);
 
   const computedSignalSec = computeSignalFreshSec(features.ts, now);
-  const signalFreshSec = features.signalAgeSec ?? computedSignalSec;
+  const signalFreshSec = features.signalAgeSec ?? features.candleAgeSec ?? computedSignalSec;
   const staleLimit = cfg.scalp?.signalStaleSec ?? 10;
   const signalFresh = signalFreshSec <= staleLimit;
 

@@ -143,7 +143,8 @@ export async function loop(ex: IExchange, symbol: string) {
     active.plan.sl = updatedStop;
 
     const holdSec = (Date.now() - active.firstFillTs) / 1000;
-    active.barsHeld = barsSinceEntry(snapshot, active.entryBarTs);
+    const totalBarsSinceEntry = barsSinceEntry(snapshot, active.entryBarTs);
+    active.barsHeld = Math.max(0, totalBarsSinceEntry - 1);
 
     if (holdSec >= (cfg.scalp?.maxHoldSec ?? active.plan.maxHoldSec) - 30 && holdSec < active.plan.maxHoldSec) {
       console.warn(`[scalp] ${symbol} holdSec=${holdSec.toFixed(1)} nearing cap ${active.plan.maxHoldSec}`);
@@ -218,7 +219,7 @@ export async function loop(ex: IExchange, symbol: string) {
 
   const forbidMkt = nsw.policy.forbidMarket;
   const limitPx = orderSide === "BUY" ? entryRef - snapshot.tickSize : entryRef + snapshot.tickSize;
-  const signalAgeSec = snapshot.signalAgeSec ?? computeSignalFreshSec(snapshot.ts);
+  const signalAgeSec = snapshot.signalAgeSec ?? snapshot.candleAgeSec ?? computeSignalFreshSec(snapshot.ts);
 
   const report = await routeOrder(ex, {
     symbol,
