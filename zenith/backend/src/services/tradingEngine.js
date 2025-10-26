@@ -1226,7 +1226,22 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const tick = this.latestTicks.get(decision.symbol);
-    const referencePrice = Number.isFinite(decision.referencePrice)
+    const explicitExitPrice = [
+      decision.exitPrice,
+      decision.closePrice,
+      decision.limitPrice,
+      decision.targetPrice,
+      decision.orderPrice,
+      decision.desiredPrice,
+      decision.price,
+      decision.referencePrice,
+    ]
+      .map((value) => toNumber(value))
+      .find((value) => Number.isFinite(value) && value > 0);
+
+    const referencePrice = Number.isFinite(explicitExitPrice)
+      ? explicitExitPrice
+      : Number.isFinite(decision.referencePrice)
       ? decision.referencePrice
       : Number.isFinite(tick?.price)
       ? tick.price
@@ -1240,7 +1255,9 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const quantityParam = normalized?.quantityText ?? Number(exitQuantity.toFixed(6));
-    const exitPrice = Number.isFinite(referencePrice)
+    const exitPrice = Number.isFinite(explicitExitPrice)
+      ? explicitExitPrice
+      : Number.isFinite(referencePrice)
       ? referencePrice
       : Number.isFinite(tick?.price)
       ? tick.price
