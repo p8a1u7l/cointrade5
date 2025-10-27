@@ -1,11 +1,11 @@
 import fs from 'fs';
+import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
-const DIST_RELATIVE = '../../dist/packages/signals/src/index.js';
-const SRC_RELATIVE = '../../packages/signals/src/index.ts';
-
-const distPath = fileURLToPath(new URL(DIST_RELATIVE, import.meta.url));
-const srcPath = fileURLToPath(new URL(SRC_RELATIVE, import.meta.url));
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(moduleDir, '../..');
+const distPath = path.resolve(repoRoot, 'dist/packages/signals/src/index.js');
+const srcPath = path.resolve(repoRoot, 'packages/signals/src/index.ts');
 
 let cachedModulePromise = null;
 let tsLoaderReady = false;

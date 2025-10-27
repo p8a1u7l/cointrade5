@@ -53,7 +53,7 @@ const parseList = (value, fallback) => {
 const strategyMode = parseStrategyMode(process.env.STRATEGY_MODE);
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(moduleDir, '../../..');
+const repoRoot = path.resolve(moduleDir, '../..');
 const defaultInterestRoot = path.resolve(repoRoot, 'packages/interest-watcher');
 const defaultInterestDist = path.resolve(
   repoRoot,
