@@ -9,7 +9,7 @@ import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
 import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
 import { runScalpLoop, updateScalpInterest } from './scalpSignals.js';
-import { getInterestHotlist } from './interestHotlist.js';
+import { getInterestHotlist, setInterestWatcherEnabled as applyInterestWatcherEnabled } from './interestHotlist.js';
 import { alignInterestEntries } from './interestSymbolResolver.js';
 
 const BASE_ORDER_NOTIONAL = 40;
@@ -128,10 +128,12 @@ export class TradingEngine extends TypedEventEmitter {
     this.loopTimer = undefined;
     this._lastHotlistAt = 0;
     this.binance = new BinanceClient();
-    this.strategyMode = config.trading.strategyMode ?? 'llm';
+    this.defaultStrategyMode = config.trading.strategyMode ?? 'llm';
+    this.strategyMode = this.defaultStrategyMode;
     this.scalpExchange = this.strategyMode === 'scalp'
       ? createBinanceExchangeAdapter(this.binance)
       : null;
+    this.strategyModeBeforeWatcherDisable = null;
     this.recorder = new AnalyticsRecorder();
     this.stream = new BinanceRealtimeFeed();
     this.latestTicks = new Map();
@@ -143,11 +145,17 @@ export class TradingEngine extends TypedEventEmitter {
     this.aiRevalidationMs = 240_000;
     this.baseSymbolsValidated = false;
     this.blockedSymbols = new Set();
+    this.interestWatcherEnabled = config.interestWatcher?.enabled !== false;
 
     this.stream.on('tick', (tick) => {
       this.latestTicks.set(tick.symbol, tick);
       this.emit('tick', tick);
     });
+
+    if (!this.isInterestWatcherEnabled() && this.strategyMode === 'scalp') {
+      this.strategyModeBeforeWatcherDisable = this.strategyMode;
+      this.setStrategyMode('llm');
+    }
   }
 
   getActiveSymbols() {
@@ -172,7 +180,7 @@ export class TradingEngine extends TypedEventEmitter {
   }
 
   async refreshInterestHotlist(force = false) {
-    if (!config.interestWatcher || config.interestWatcher.enabled === false) {
+    if (!this.isInterestWatcherEnabled()) {
       return this.cachedInterestHot;
     }
     const nowTs = Date.now();
@@ -234,6 +242,59 @@ export class TradingEngine extends TypedEventEmitter {
       logger.warn({ error }, 'Failed to refresh interest hotlist');
       return this.cachedInterestHot;
     }
+  }
+
+  getStrategyMode() {
+    return this.strategyMode;
+  }
+
+  setStrategyMode(mode) {
+    const normalized = mode === 'scalp' ? 'scalp' : 'llm';
+    if (this.strategyMode === normalized) {
+      return this.strategyMode;
+    }
+
+    this.strategyMode = normalized;
+    config.trading.strategyMode = normalized;
+
+    if (normalized === 'scalp') {
+      this.scalpExchange = createBinanceExchangeAdapter(this.binance);
+    } else {
+      this.scalpExchange = null;
+    }
+
+    logger.info({ mode: this.strategyMode }, 'Trading strategy mode changed');
+    return this.strategyMode;
+  }
+
+  isInterestWatcherEnabled() {
+    return this.interestWatcherEnabled !== false;
+  }
+
+  setInterestWatcherEnabled(enabled) {
+    const normalized = enabled === true;
+    if (this.interestWatcherEnabled === normalized) {
+      return { enabled: this.isInterestWatcherEnabled(), strategyMode: this.getStrategyMode() };
+    }
+
+    applyInterestWatcherEnabled(normalized);
+    this.interestWatcherEnabled = normalized;
+    this._lastHotlistAt = 0;
+    this.cachedInterestHot = { updatedAt: 0, entries: [], totals: [] };
+
+    if (!normalized) {
+      this.strategyModeBeforeWatcherDisable = this.strategyMode;
+      if (this.strategyMode === 'scalp') {
+        this.setStrategyMode('llm');
+      }
+    } else {
+      const target = this.strategyModeBeforeWatcherDisable ?? this.defaultStrategyMode;
+      this.strategyModeBeforeWatcherDisable = null;
+      this.setStrategyMode(target);
+    }
+
+    logger.info({ enabled: this.interestWatcherEnabled }, 'Interest watcher toggle applied');
+    return { enabled: this.isInterestWatcherEnabled(), strategyMode: this.getStrategyMode() };
   }
 
   invalidateBalanceCache() {

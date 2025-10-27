@@ -50,6 +50,23 @@ export function __resetInterestHotlistCacheForTests() {
   inflightFetch = null;
 }
 
+export function setInterestWatcherEnabled(enabled) {
+  const normalized = enabled === true;
+  if (interestCfg.enabled === normalized) {
+    return interestCfg.enabled !== false;
+  }
+
+  interestCfg.enabled = normalized;
+  cache = { timestamp: 0, payload: { entries: [], totals: [], updatedAt: 0 } };
+  cachedWatcherPromise = null;
+  inflightFetch = null;
+  return interestCfg.enabled !== false;
+}
+
+export function isInterestWatcherEnabled() {
+  return interestCfg.enabled !== false;
+}
+
 function ensureEnvBootstrap() {
   if (!projectDir) return;
   const envPath = path.join(projectDir, '.env');

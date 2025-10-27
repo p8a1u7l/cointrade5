@@ -43,7 +43,7 @@ test('interest hotlist normalises watcher payload and caches results', async (t)
     },
     async () => {
       const module = await import('../services/interestHotlist.js');
-      const { getInterestHotlist, __resetInterestHotlistCacheForTests } = module;
+      const { getInterestHotlist, __resetInterestHotlistCacheForTests, setInterestWatcherEnabled } = module;
 
       t.after(() => {
         __resetInterestHotlistCacheForTests();
@@ -68,6 +68,16 @@ test('interest hotlist normalises watcher payload and caches results', async (t)
       assert.equal(watcherModule.stats.calls, 2);
       assert.notEqual(refreshed, first);
       assert.equal(refreshed.entries[0].symbol, 'BTC');
+
+      setInterestWatcherEnabled(false);
+      const disabled = await getInterestHotlist({ force: true });
+      assert.equal(disabled.entries.length, 0);
+      assert.equal(watcherModule.stats.calls, 2);
+
+      setInterestWatcherEnabled(true);
+      const reenabled = await getInterestHotlist({ force: true });
+      assert.equal(reenabled.entries.length, 1);
+      assert.equal(watcherModule.stats.calls, 3);
     },
   );
 });
