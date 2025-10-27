@@ -25,39 +25,10 @@
 | `DL_SERVICE_URL` | 선택 | 딥러닝 시그널 서비스 URL | `http://localhost:4500/api/dl`
 | `NSW_SERVICE_URL` | 선택 | 뉴럴 슬리피지 와치(NSW) 서비스 URL | `http://localhost:4501/api/nsw`
 | `POLICY_SERVICE_URL` | 선택 | 정책 모델 서비스 URL | `http://localhost:4502/api/policy`
-| `INTEREST_WATCHER_ENABLED` | 선택 | 뉴스/커뮤니티 관심도 수집 사용 여부 | `true`
-| `INTEREST_WATCHER_PROJECT_DIR` | 선택 | 관심도 패키지 루트 경로 | 기본: `packages/interest-watcher`
-| `INTEREST_WATCHER_DATA_DIR` | 선택 | 관심도 JSON이 저장될 디렉터리 | 기본: `<project>/news_interest`
-| `INTEREST_WATCHER_STATE_DIR` | 선택 | 관심도 상태 캐시 디렉터리 | 기본: `<project>/.interest_state`
-| `INTEREST_WATCHER_DIST_MODULE` | 선택 | 빌드된 JS 모듈 경로. 빌드를 건너뛰면 비워 두고 TypeScript 폴백 사용 | 기본: `dist/packages/interest-watcher/index.js`
-| `INTEREST_WATCHER_MIN_SCORE` | 선택 | 관심도 순위 필터 | `2.0`
-| `INTEREST_WATCHER_MAX_SYMBOLS` | 선택 | 백엔드가 유지하는 최대 관심 심볼 수 | `8`
-
 > 참고: `.env`에 빈 문자열을 넣으면 로더가 값을 무시하므로, 사용하지 않을 항목은 키를 생략하세요.
 
-## 3. `zenith/packages/interest-watcher/.env`
-백엔드가 TypeScript 원본을 직접 로드할 때 이 패키지의 `.env` 파일도 함께 적용됩니다. 뉴스/커뮤니티 스캐너를 사용하려면 다음 항목을 준비하세요.
-
-| 키 | 필수 여부 | 설명 | 기본값/비고 |
-| --- | --- | --- | --- |
-| `CRYPTOPANIC_TOKEN` | 권장 | CryptoPanic API 토큰. 설정하지 않으면 CryptoPanic 데이터는 제외됩니다. | 없음 (입력 필요)
-| `OUT_DIR` | 선택 | 수집 결과(JSON)를 저장할 경로 | `news_interest`
-| `STATE_DIR` | 선택 | 러닝 상태 캐시 경로 | `.interest_state`
-| `WINDOW_MIN` | 선택 | 관심도 이동 창 크기(분) | `180`
-| `BASE_EWMA_DECAY` | 선택 | EWMA 감쇠 계수 | `0.2`
-| `HOT_Z` | 선택 | 관심도 점수 Z-스코어 임계값 | `2.0`
-| `MIN_COUNT` | 선택 | 최소 언급 횟수 | `3`
-| `MIN_SOURCES` | 선택 | 최소 소스 수 | `2`
-| `TIMEOUT_MS` | 선택 | HTTP 요청 타임아웃 | `8000`
-| `RETRY` | 선택 | HTTP 재시도 횟수 | `3`
-| `PAUSE_MS` | 선택 | 연속 요청 사이 대기(ms) | `300`
-| `REDDIT_SUBS` | 선택 | 모니터링할 서브레딧 목록(콤마 구분) | `Cryptocurrency,BitcoinMarkets,ethtrader`
-| `REDDIT_LIMIT` | 선택 | 서브레딧 당 게시물 최대 수 | `25`
-| `REDDIT_SORT` | 선택 | 정렬 기준(`new`, `hot`, `rising`, `top`) | `new`
-| `REDDIT_PAUSE_MS` | 선택 | 서브레딧 순회 사이 대기(ms) | `500`
-| `REDDIT_USER_AGENT` | 선택 | Reddit 요청 User-Agent | `script:interest-trend-watcher:1.0 (by /u/interestwatcher)`
-
-- 백엔드 `INTEREST_WATCHER_DATA_DIR` 또는 `STATE_DIR`을 커스터마이징했다면, 이 파일에서도 `OUT_DIR`/`STATE_DIR` 값을 동일하게 맞추세요. 일치하지 않으면 서로 다른 위치에 파일이 생성됩니다.
+## 3. 변동성 기반 핫 리스트
+백엔드는 별도의 관심도 워처 없이 바이낸스 24시간 변동성과 거래량 데이터를 바탕으로 핫 리스트를 구성합니다. 추가 빌드나 패키지 설정이 필요하지 않으며, 필요 시 `SYMBOL_DISCOVERY_TOP_LIMIT`·`SYMBOL_DISCOVERY_MIN_QUOTE_VOLUME` 등의 값을 조정해 후보군 규모와 최소 거래량 기준을 변경할 수 있습니다.
 
 ## 4. `zenith/frontend/.env`
 프런트엔드는 Vite 환경 변수를 통해 백엔드 엔드포인트를 참조합니다.
@@ -87,7 +58,6 @@ VITE_SYMBOLS=BTCUSDT,ETHUSDT                         # 초기 대시보드 심�
    ```
 
 ## 6. 추가 체크사항
-- 백엔드가 생성하는 뉴스/관심 데이터는 기본적으로 `zenith/packages/interest-watcher/news_interest`와 `zenith/packages/interest-watcher/.interest_state`에 저장됩니다. 커스텀 경로를 사용하는 경우 해당 디렉터리가 쓰기 가능해야 합니다.
 - `zenith/backend/src/config.js`에서 `STRATEGY_MODE=llm`으로 설정하면 OpenAI 호출이 필수가 되며, LLM 결과가 지연되면 자동으로 실패 처리됩니다.
 - 정책/딥러닝/피처 서비스 URL을 로컬 모킹 서버로 교체할 수 있습니다. 미구동 상태로 두면 호출이 실패하므로 필요 시 프록시 서버를 준비하세요.
 - `.env` 파일이 Git에 커밋되지 않도록 루트 `.gitignore`가 이미 설정되어 있습니다. 자격 증명은 반드시 개인 환경에서만 관리하세요.

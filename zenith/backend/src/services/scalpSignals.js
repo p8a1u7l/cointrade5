@@ -65,13 +65,6 @@ const aliasPrefixMap = [
       path.join(repoRoot, 'packages/models-llm/src/'),
     ],
   },
-  {
-    prefix: '@repo/interest-watcher/',
-    roots: [
-      path.join(distRoot, 'packages/interest-watcher/src/'),
-      path.join(repoRoot, 'packages/interest-watcher/src/'),
-    ],
-  },
 ];
 
 const aliasExactMap = [
@@ -80,13 +73,6 @@ const aliasExactMap = [
     candidates: [
       path.join(distRoot, 'packages/exchange-binance/index.js'),
       path.join(repoRoot, 'packages/exchange-binance/index.ts'),
-    ],
-  },
-  {
-    spec: '@repo/interest-watcher',
-    candidates: [
-      path.join(distRoot, 'packages/interest-watcher/index.js'),
-      path.join(repoRoot, 'packages/interest-watcher/index.ts'),
     ],
   },
 ];
