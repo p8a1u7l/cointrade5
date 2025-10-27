@@ -2,11 +2,6 @@ import { BinanceClient } from '../clients/binanceClient.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
-const WATCHER_REMOVED_REASON = {
-  code: 'removed',
-  message: 'Interest watcher removed; using Binance volatility hotlist instead.',
-};
-
 const DEFAULT_CACHE_TTL_MS = 120_000;
 const DEFAULT_LIMIT = 40;
 
@@ -184,19 +179,6 @@ export function __resetInterestHotlistCacheForTests() {
 export function __setInterestHotlistProviderForTests(fn) {
   provider = typeof fn === 'function' ? fn : defaultProvider;
   cache = { timestamp: 0, payload: createEmptyPayload() };
-}
-
-export function isInterestWatcherEnabled() {
-  return false;
-}
-
-export function getInterestWatcherStatus() {
-  return { enabled: false, reason: { ...WATCHER_REMOVED_REASON } };
-}
-
-export function setInterestWatcherEnabled() {
-  logger.warn('Interest watcher requests ignored; feature removed in volatility mode');
-  return getInterestWatcherStatus();
 }
 
 export async function getInterestHotlist(options = {}) {

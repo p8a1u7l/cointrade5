@@ -108,7 +108,7 @@ test('interest hotlist builds volatility entries and caches results', async (t) 
   );
 });
 
-test('interest watcher status always reports disabled', async () => {
+test('interest hotlist module no longer exposes watcher controls', async () => {
   await withEnv(
     {
       BINANCE_API_KEY: 'key',
@@ -116,20 +116,10 @@ test('interest watcher status always reports disabled', async () => {
     },
     async () => {
       const module = await importHotlistModule();
-      const { getInterestWatcherStatus, isInterestWatcherEnabled, setInterestWatcherEnabled } = module;
 
-      assert.equal(isInterestWatcherEnabled(), false);
-      const initialStatus = getInterestWatcherStatus();
-      assert.equal(initialStatus.enabled, false);
-      assert.equal(initialStatus.reason?.code, 'removed');
-
-      const toggledOn = setInterestWatcherEnabled(true);
-      assert.equal(toggledOn.enabled, false);
-      assert.equal(toggledOn.reason?.code, 'removed');
-
-      const toggledOff = setInterestWatcherEnabled(false);
-      assert.equal(toggledOff.enabled, false);
-      assert.equal(toggledOff.reason?.code, 'removed');
+      assert.equal('setInterestWatcherEnabled' in module, false);
+      assert.equal('getInterestWatcherStatus' in module, false);
+      assert.equal('isInterestWatcherEnabled' in module, false);
     },
   );
 });
