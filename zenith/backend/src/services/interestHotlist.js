@@ -18,6 +18,12 @@ let cache = {
   payload: { entries: [], totals: [], updatedAt: 0 },
 };
 
+export function __resetInterestHotlistCacheForTests() {
+  cache = { timestamp: 0, payload: { entries: [], totals: [], updatedAt: 0 } };
+  cachedWatcherPromise = null;
+  tsLoaderReady = false;
+}
+
 function ensureEnvBootstrap() {
   if (!projectDir) return;
   const envPath = path.join(projectDir, '.env');
