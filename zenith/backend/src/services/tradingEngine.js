@@ -9,7 +9,7 @@ import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
 import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
 import { runScalpLoop, updateScalpInterest } from './scalpSignals.js';
-import { getInterestHotlist } from './interestHotlist.js';
+import { getInterestHotlist, normalizeTopMovers } from './interestHotlist.js';
 import { alignInterestEntries } from './interestSymbolResolver.js';
 
 const BASE_ORDER_NOTIONAL = 40;
@@ -44,6 +44,8 @@ const getErrorMessage = (error) => {
 
 const isPercentPriceError = (error) => PERCENT_PRICE_ERROR_REGEX.test(getErrorMessage(error));
 const isMaxPositionError = (error) => MAX_POSITION_ERROR_REGEX.test(getErrorMessage(error));
+const isInterestWatcherUnavailable = (error) =>
+  /interest\s+watcher\s+module\s+could\s+not\s+be\s+loaded/i.test(getErrorMessage(error));
 
 const toNumber = (value) => {
   const numeric = Number(value);
@@ -144,6 +146,8 @@ export class TradingEngine extends TypedEventEmitter {
     this.aiRevalidationMs = 240_000;
     this.baseSymbolsValidated = false;
     this.blockedSymbols = new Set();
+    this._getInterestHotlist = getInterestHotlist;
+    this._updateScalpInterest = updateScalpInterest;
     this.setStrategyMode(configuredMode);
 
     this.stream.on('tick', (tick) => {
@@ -182,7 +186,7 @@ export class TradingEngine extends TypedEventEmitter {
       return this.cachedInterestHot;
     }
     try {
-      const payload = await getInterestHotlist({ force });
+      const payload = await this._getInterestHotlist({ force });
       this._lastHotlistAt = Date.now();
       let normalized = payload;
 
@@ -224,14 +228,47 @@ export class TradingEngine extends TypedEventEmitter {
       this.cachedInterestHot = normalized;
       if (this.strategyMode === 'scalp') {
         try {
-          await updateScalpInterest(normalized.entries ?? []);
+          await this._updateScalpInterest(normalized.entries ?? []);
         } catch (error) {
           logger.warn({ error }, 'Unable to pass interest hotlist to scalping module');
         }
       }
       return normalized;
     } catch (error) {
-      logger.warn({ error }, 'Failed to refresh interest hotlist');
+      if (isInterestWatcherUnavailable(error)) {
+        logger.warn('Interest watcher unavailable, falling back to Binance volatility hotlist');
+        logger.debug({ error }, 'Interest watcher failure details');
+        try {
+          const discovery = config.binance.symbolDiscovery ?? {};
+          const limit = clamp(Number(discovery.topMoverLimit ?? 40), 10, 100);
+          const fallbackMovers = await this.binance.fetchTopMovers({
+            limit,
+            minQuoteVolume: discovery.minQuoteVolume,
+            quoteAssets: discovery.quoteAssets,
+          });
+          const fallback = normalizeTopMovers(fallbackMovers);
+          this.cachedInterestHot = fallback;
+          this._lastHotlistAt = Date.now();
+          if (this.strategyMode === 'scalp') {
+            try {
+              await this._updateScalpInterest(fallback.entries ?? []);
+            } catch (interestError) {
+              logger.warn(
+                { error: interestError },
+                'Unable to pass fallback interest hotlist to scalping module',
+              );
+            }
+          }
+          return fallback;
+        } catch (fallbackError) {
+          logger.warn(
+            { error: fallbackError },
+            'Fallback Binance volatility hotlist generation failed',
+          );
+        }
+      } else {
+        logger.warn({ error }, 'Failed to refresh interest hotlist');
+      }
       return this.cachedInterestHot;
     }
   }

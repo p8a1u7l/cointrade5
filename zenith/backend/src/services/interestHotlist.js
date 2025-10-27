@@ -85,7 +85,7 @@ function buildReasons({ changePct, volatilityPct, quoteVolume }) {
   return reasons.slice(0, 3);
 }
 
-function normalizeTopMovers(movers) {
+export function normalizeTopMovers(movers) {
   const now = Date.now();
   if (!Array.isArray(movers) || movers.length === 0) {
     return { entries: [], totals: [], updatedAt: now };

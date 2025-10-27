@@ -151,3 +151,72 @@ test('trading engine keeps scalping as the base strategy without interest watche
     },
   );
 });
+
+test('trading engine falls back to volatility hotlist when legacy watcher fails', async (t) => {
+  await withEnv(
+    {
+      BINANCE_API_KEY: 'key',
+      BINANCE_API_SECRET: 'secret',
+    },
+    async () => {
+      const binanceModule = await import('../clients/binanceClient.js');
+
+      const watcherError = new Error(
+        'Interest watcher module could not be loaded. Run "npm run build --prefix zenith" to compile the interest watcher.',
+      );
+      const fallbackMovers = [
+        {
+          symbol: 'BTCUSDT',
+          quoteAsset: 'USDT',
+          priceChangePercent: 6.4,
+          quoteVolume: 960_000_000,
+          baseVolume: 28_500,
+          volatilityPct: 12.1,
+          direction: 'up',
+        },
+        {
+          symbol: 'ETHUSDT',
+          quoteAsset: 'USDT',
+          priceChangePercent: -4.2,
+          quoteVolume: 520_000_000,
+          baseVolume: 18_200,
+          volatilityPct: 9.3,
+          direction: 'down',
+        },
+      ];
+
+      const fetchTopMovers = t.mock.method(
+        binanceModule.BinanceClient.prototype,
+        'fetchTopMovers',
+        async () => fallbackMovers,
+      );
+
+      const { TradingEngine } = await import('../services/tradingEngine.js');
+      const engine = new TradingEngine(['BTCUSDT']);
+      const originalGetHotlist = engine._getInterestHotlist;
+      engine._getInterestHotlist = async () => {
+        throw watcherError;
+      };
+      const originalUpdateInterest = engine._updateScalpInterest;
+      let interestUpdates = 0;
+      engine._updateScalpInterest = async () => {
+        interestUpdates += 1;
+      };
+
+      t.after(() => {
+        engine.stop();
+        engine._getInterestHotlist = originalGetHotlist;
+        engine._updateScalpInterest = originalUpdateInterest;
+        fetchTopMovers.mock.restore();
+      });
+
+      const snapshot = await engine.refreshInterestHotlist(true);
+      assert.equal(fetchTopMovers.mock.callCount(), 1);
+      assert.equal(interestUpdates, 1);
+      assert.equal(snapshot.entries.length, 2);
+      assert.equal(snapshot.entries[0].tradingSymbol, 'BTCUSDT');
+      assert.equal(snapshot.entries[1].tradingSymbol, 'ETHUSDT');
+      assert.ok(snapshot.updatedAt > 0);
+    },
+  );
+});
