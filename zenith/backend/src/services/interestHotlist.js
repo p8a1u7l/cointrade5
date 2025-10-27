@@ -8,13 +8,33 @@ const interestCfg = config.interestWatcher ?? { enabled: false };
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(moduleDir, '../../..');
 const tsconfigPath = path.resolve(repoRoot, 'tsconfig.json');
-const projectDir = interestCfg.projectDir ?? null;
-const distModule = interestCfg.distModule ?? null;
-const tsEntry = projectDir ? path.resolve(projectDir, 'src/watcher.ts') : null;
-
 let tsApiPromise = null;
 
 let cachedWatcherPromise = null;
+
+let disableReason = null;
+
+const DEFAULT_DISABLE_REASON = {
+  code: 'disabled',
+  message: 'Interest watcher disabled',
+};
+
+function normalizeDisableReason(reason) {
+  if (!reason) {
+    return null;
+  }
+  if (typeof reason === 'string') {
+    return { code: reason, message: reason };
+  }
+  const code = typeof reason.code === 'string' && reason.code.length > 0 ? reason.code : 'unknown';
+  const message =
+    typeof reason.message === 'string' && reason.message.length > 0
+      ? reason.message
+      : typeof reason.detail === 'string' && reason.detail.length > 0
+      ? reason.detail
+      : code;
+  return { code, message };
+}
 
 async function loadTsWatcher(filePath) {
   if (!tsApiPromise) {
@@ -48,11 +68,20 @@ export function __resetInterestHotlistCacheForTests() {
   cachedWatcherPromise = null;
   tsApiPromise = null;
   inflightFetch = null;
+  disableReason = null;
 }
 
-export function setInterestWatcherEnabled(enabled) {
+export function setInterestWatcherEnabled(enabled, options = {}) {
   const normalized = enabled === true;
-  if (interestCfg.enabled === normalized) {
+  const previous = interestCfg.enabled !== false;
+  const reason = normalizeDisableReason(options.reason);
+
+  if (previous === normalized) {
+    if (normalized) {
+      disableReason = null;
+    } else if (reason) {
+      disableReason = reason;
+    }
     return interestCfg.enabled !== false;
   }
 
@@ -60,6 +89,12 @@ export function setInterestWatcherEnabled(enabled) {
   cache = { timestamp: 0, payload: { entries: [], totals: [], updatedAt: 0 } };
   cachedWatcherPromise = null;
   inflightFetch = null;
+
+  if (normalized) {
+    disableReason = null;
+  } else {
+    disableReason = reason ?? disableReason ?? DEFAULT_DISABLE_REASON;
+  }
   return interestCfg.enabled !== false;
 }
 
@@ -67,7 +102,15 @@ export function isInterestWatcherEnabled() {
   return interestCfg.enabled !== false;
 }
 
+export function getInterestWatcherStatus() {
+  return {
+    enabled: interestCfg.enabled !== false,
+    reason: disableReason,
+  };
+}
+
 function ensureEnvBootstrap() {
+  const projectDir = interestCfg.projectDir ?? null;
   if (!projectDir) return;
   const envPath = path.join(projectDir, '.env');
   if (!process.env.DOTENV_CONFIG_PATH && fs.existsSync(envPath)) {
@@ -86,9 +129,12 @@ async function loadWatcherModule() {
     cachedWatcherPromise = (async () => {
       ensureEnvBootstrap();
       const candidates = [];
+      const distModule = interestCfg.distModule ?? null;
       if (distModule) {
         candidates.push({ type: 'js', path: distModule });
       }
+      const projectDir = interestCfg.projectDir ?? null;
+      const tsEntry = projectDir ? path.resolve(projectDir, 'src/watcher.ts') : null;
       if (tsEntry) {
         candidates.push({ type: 'ts', path: tsEntry });
       }
@@ -120,6 +166,7 @@ async function loadWatcherModule() {
         hints.push('Install workspace dependencies with "npm install --prefix zenith" to enable TypeScript fallbacks.');
       }
       const error = new Error(`Interest watcher module could not be loaded. ${hints.join(' ')}`);
+      error.code = 'INTEREST_WATCHER_MODULE_NOT_FOUND';
       error.cause = lastError;
       throw error;
     })();
@@ -215,6 +262,27 @@ export async function getInterestHotlist(options = {}) {
       return normalized;
     } catch (error) {
       logger.warn({ error }, 'Failed to refresh interest hotlist');
+      if (error?.code === 'INTEREST_WATCHER_MODULE_NOT_FOUND') {
+        const wasEnabled = interestCfg.enabled !== false;
+        const message =
+          error?.message ??
+          'Interest watcher module is unavailable. Disabling watcher until it is rebuilt or reconfigured.';
+        setInterestWatcherEnabled(false, {
+          reason: {
+            code: 'missing-module',
+            message,
+          },
+        });
+        if (wasEnabled) {
+          logger.warn(
+            {
+              distModule: interestCfg.distModule ?? undefined,
+              projectDir: interestCfg.projectDir ?? undefined,
+            },
+            'Interest watcher disabled after module load failure; scalping will continue without watcher',
+          );
+        }
+      }
       if (cache.payload.entries.length > 0) {
         return cache.payload;
       }

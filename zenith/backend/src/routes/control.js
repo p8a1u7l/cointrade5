@@ -60,8 +60,10 @@ export function createControlRouter(engine) {
   });
 
   router.get('/interest-watcher', (_req, res) => {
+    const status = engine.getInterestWatcherStatus();
     res.json({
-      enabled: engine.isInterestWatcherEnabled(),
+      enabled: status.enabled,
+      reason: status.reason ?? null,
       strategyMode: engine.getStrategyMode(),
     });
   });
@@ -76,6 +78,7 @@ export function createControlRouter(engine) {
     const toggled = engine.setInterestWatcherEnabled(state === 'enable');
     res.status(200).json({
       enabled: toggled.enabled,
+      reason: toggled.reason ?? null,
       strategyMode: toggled.strategyMode,
     });
   });

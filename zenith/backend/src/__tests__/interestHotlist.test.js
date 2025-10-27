@@ -43,7 +43,12 @@ test('interest hotlist normalises watcher payload and caches results', async (t)
     },
     async () => {
       const module = await import('../services/interestHotlist.js');
-      const { getInterestHotlist, __resetInterestHotlistCacheForTests, setInterestWatcherEnabled } = module;
+      const {
+        getInterestHotlist,
+        __resetInterestHotlistCacheForTests,
+        setInterestWatcherEnabled,
+        getInterestWatcherStatus,
+      } = module;
 
       t.after(() => {
         __resetInterestHotlistCacheForTests();
@@ -73,11 +78,17 @@ test('interest hotlist normalises watcher payload and caches results', async (t)
       const disabled = await getInterestHotlist({ force: true });
       assert.equal(disabled.entries.length, 0);
       assert.equal(watcherModule.stats.calls, 2);
+      const disabledStatus = getInterestWatcherStatus();
+      assert.equal(disabledStatus.enabled, false);
+      assert.equal(disabledStatus.reason?.code, 'disabled');
 
       setInterestWatcherEnabled(true);
       const reenabled = await getInterestHotlist({ force: true });
       assert.equal(reenabled.entries.length, 1);
       assert.equal(watcherModule.stats.calls, 3);
+      const enabledStatus = getInterestWatcherStatus();
+      assert.equal(enabledStatus.enabled, true);
+      assert.equal(enabledStatus.reason, null);
     },
   );
 });
@@ -102,6 +113,7 @@ test('trading engine uses scalping as the base strategy while interest watcher t
 
       const disabled = engine.setInterestWatcherEnabled(false);
       assert.equal(disabled.enabled, false);
+      assert.equal(disabled.reason?.code, 'manual-toggle');
       assert.equal(disabled.strategyMode, 'scalp');
 
       const llmMode = engine.setStrategyMode('llm');
@@ -110,6 +122,7 @@ test('trading engine uses scalping as the base strategy while interest watcher t
 
       const reenabled = engine.setInterestWatcherEnabled(true);
       assert.equal(reenabled.enabled, true);
+      assert.equal(reenabled.reason, null);
       assert.equal(reenabled.strategyMode, 'llm');
       assert.equal(engine.getStrategyMode(), 'llm');
 
@@ -118,4 +131,55 @@ test('trading engine uses scalping as the base strategy while interest watcher t
       assert.equal(engine.getStrategyMode(), 'scalp');
     },
   );
+});
+
+test('interest watcher auto-disables when the module is missing', async (t) => {
+  const missingDist = path.resolve(__dirname, '__fixtures__/missing-watcher.js');
+  const missingProject = path.resolve(__dirname, '__fixtures__/missing-project');
+
+  const { config } = await import('../config.js');
+  const module = await import('../services/interestHotlist.js');
+  const {
+    getInterestHotlist,
+    getInterestWatcherStatus,
+    __resetInterestHotlistCacheForTests,
+    setInterestWatcherEnabled,
+  } = module;
+
+  const previous = {
+    enabled: config.interestWatcher.enabled,
+    distModule: config.interestWatcher.distModule,
+    projectDir: config.interestWatcher.projectDir,
+    dataDir: config.interestWatcher.dataDir,
+    stateDir: config.interestWatcher.stateDir,
+  };
+
+  config.interestWatcher.enabled = true;
+  config.interestWatcher.distModule = missingDist;
+  config.interestWatcher.projectDir = missingProject;
+  config.interestWatcher.dataDir = undefined;
+  config.interestWatcher.stateDir = undefined;
+
+  __resetInterestHotlistCacheForTests();
+  setInterestWatcherEnabled(true);
+
+  t.after(() => {
+    config.interestWatcher.enabled = previous.enabled;
+    config.interestWatcher.distModule = previous.distModule;
+    config.interestWatcher.projectDir = previous.projectDir;
+    config.interestWatcher.dataDir = previous.dataDir;
+    config.interestWatcher.stateDir = previous.stateDir;
+    __resetInterestHotlistCacheForTests();
+  });
+
+  const payload = await getInterestHotlist({ force: true });
+  assert.equal(Array.isArray(payload.entries) ? payload.entries.length : 0, 0);
+
+  const status = getInterestWatcherStatus();
+  assert.equal(status.enabled, false);
+  assert.equal(status.reason?.code, 'missing-module');
+  assert.ok(status.reason?.message.includes('Interest watcher module'));
+
+  const second = await getInterestHotlist({ force: true });
+  assert.equal(second.entries.length, 0);
 });

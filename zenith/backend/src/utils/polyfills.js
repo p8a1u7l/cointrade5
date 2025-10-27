@@ -1,7 +1,15 @@
-import undiciImport from 'undici';
 import { Blob as BufferBlob } from 'buffer';
 
-const undici = undiciImport?.default ?? undiciImport ?? {};
+let undici = {};
+try {
+  const undiciImport = await import('undici');
+  undici = undiciImport?.default ?? undiciImport ?? {};
+} catch (error) {
+  if (error?.code !== 'ERR_MODULE_NOT_FOUND') {
+    throw error;
+  }
+  undici = {};
+}
 
 const undiciFetch = typeof undici.fetch === 'function' ? undici.fetch : undefined;
 const UndiciHeaders = typeof undici.Headers === 'function' ? undici.Headers : undefined;
