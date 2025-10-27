@@ -133,7 +133,6 @@ export class TradingEngine extends TypedEventEmitter {
     this.scalpExchange = this.strategyMode === 'scalp'
       ? createBinanceExchangeAdapter(this.binance)
       : null;
-    this.strategyModeBeforeWatcherDisable = null;
     this.recorder = new AnalyticsRecorder();
     this.stream = new BinanceRealtimeFeed();
     this.latestTicks = new Map();
@@ -152,10 +151,6 @@ export class TradingEngine extends TypedEventEmitter {
       this.emit('tick', tick);
     });
 
-    if (!this.isInterestWatcherEnabled() && this.strategyMode === 'scalp') {
-      this.strategyModeBeforeWatcherDisable = this.strategyMode;
-      this.setStrategyMode('llm');
-    }
   }
 
   getActiveSymbols() {
@@ -281,17 +276,6 @@ export class TradingEngine extends TypedEventEmitter {
     this.interestWatcherEnabled = normalized;
     this._lastHotlistAt = 0;
     this.cachedInterestHot = { updatedAt: 0, entries: [], totals: [] };
-
-    if (!normalized) {
-      this.strategyModeBeforeWatcherDisable = this.strategyMode;
-      if (this.strategyMode === 'scalp') {
-        this.setStrategyMode('llm');
-      }
-    } else {
-      const target = this.strategyModeBeforeWatcherDisable ?? this.defaultStrategyMode;
-      this.strategyModeBeforeWatcherDisable = null;
-      this.setStrategyMode(target);
-    }
 
     logger.info({ enabled: this.interestWatcherEnabled }, 'Interest watcher toggle applied');
     return { enabled: this.isInterestWatcherEnabled(), strategyMode: this.getStrategyMode() };

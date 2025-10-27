@@ -81,3 +81,35 @@ test('interest hotlist normalises watcher payload and caches results', async (t)
     },
   );
 });
+
+test('trading engine keeps current strategy when interest watcher is toggled', async (t) => {
+  await withEnv(
+    {
+      BINANCE_API_KEY: 'key',
+      BINANCE_API_SECRET: 'secret',
+      INTEREST_WATCHER_ENABLED: 'true',
+      STRATEGY_MODE: 'scalp',
+    },
+    async () => {
+      const module = await import('../services/tradingEngine.js');
+      const { TradingEngine } = module;
+
+      const engine = new TradingEngine(['BTCUSDT']);
+      t.after(() => {
+        engine.stop();
+      });
+
+      assert.equal(engine.getStrategyMode(), 'scalp');
+
+      const disabled = engine.setInterestWatcherEnabled(false);
+      assert.equal(disabled.enabled, false);
+      assert.equal(disabled.strategyMode, 'scalp');
+      assert.equal(engine.getStrategyMode(), 'scalp');
+
+      const reenabled = engine.setInterestWatcherEnabled(true);
+      assert.equal(reenabled.enabled, true);
+      assert.equal(reenabled.strategyMode, 'scalp');
+      assert.equal(engine.getStrategyMode(), 'scalp');
+    },
+  );
+});
