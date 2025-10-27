@@ -88,7 +88,7 @@ test('trading engine keeps current strategy when interest watcher is toggled', a
       BINANCE_API_KEY: 'key',
       BINANCE_API_SECRET: 'secret',
       INTEREST_WATCHER_ENABLED: 'true',
-      STRATEGY_MODE: 'scalp',
+      STRATEGY_MODE: 'llm',
     },
     async () => {
       const module = await import('../services/tradingEngine.js');
@@ -99,6 +99,10 @@ test('trading engine keeps current strategy when interest watcher is toggled', a
         engine.stop();
       });
 
+      assert.equal(engine.getStrategyMode(), 'scalp');
+
+      const enforced = engine.setStrategyMode('llm');
+      assert.equal(enforced, 'scalp');
       assert.equal(engine.getStrategyMode(), 'scalp');
 
       const disabled = engine.setInterestWatcherEnabled(false);

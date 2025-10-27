@@ -128,11 +128,10 @@ export class TradingEngine extends TypedEventEmitter {
     this.loopTimer = undefined;
     this._lastHotlistAt = 0;
     this.binance = new BinanceClient();
-    this.defaultStrategyMode = config.trading.strategyMode ?? 'llm';
-    this.strategyMode = this.defaultStrategyMode;
-    this.scalpExchange = this.strategyMode === 'scalp'
-      ? createBinanceExchangeAdapter(this.binance)
-      : null;
+    this.defaultStrategyMode = 'scalp';
+    this.strategyMode = 'scalp';
+    config.trading.strategyMode = 'scalp';
+    this.scalpExchange = createBinanceExchangeAdapter(this.binance);
     this.recorder = new AnalyticsRecorder();
     this.stream = new BinanceRealtimeFeed();
     this.latestTicks = new Map();
@@ -244,21 +243,17 @@ export class TradingEngine extends TypedEventEmitter {
   }
 
   setStrategyMode(mode) {
-    const normalized = mode === 'scalp' ? 'scalp' : 'llm';
-    if (this.strategyMode === normalized) {
-      return this.strategyMode;
+    if (mode !== 'scalp') {
+      logger.warn({ requestedMode: mode }, 'Ignoring non-scalp strategy mode request');
     }
 
-    this.strategyMode = normalized;
-    config.trading.strategyMode = normalized;
-
-    if (normalized === 'scalp') {
+    if (this.strategyMode !== 'scalp' || !this.scalpExchange) {
+      this.strategyMode = 'scalp';
+      config.trading.strategyMode = 'scalp';
       this.scalpExchange = createBinanceExchangeAdapter(this.binance);
-    } else {
-      this.scalpExchange = null;
+      logger.info({ mode: this.strategyMode }, 'Trading strategy mode enforced to scalping');
     }
 
-    logger.info({ mode: this.strategyMode }, 'Trading strategy mode changed');
     return this.strategyMode;
   }
 
