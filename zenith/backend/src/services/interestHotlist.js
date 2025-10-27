@@ -18,12 +18,17 @@ let cachedWatcherPromise = null;
 
 async function loadTsWatcher(filePath) {
   if (!tsApiPromise) {
-    tsApiPromise = import('tsx/esm/api').then((api) => {
-      if (typeof api.register === 'function') {
-        api.register({ namespace: 'zenith-backend-interest', tsconfig: tsconfigPath });
-      }
-      return api;
-    });
+    tsApiPromise = import('tsx/esm/api')
+      .then((api) => {
+        if (typeof api?.tsImport !== 'function') {
+          throw new Error('tsx runtime does not expose tsImport()');
+        }
+        return api;
+      })
+      .catch((error) => {
+        tsApiPromise = null;
+        throw error;
+      });
   }
 
   const api = await tsApiPromise;
@@ -82,10 +87,18 @@ async function loadWatcherModule() {
         }
       }
 
-      const hint = distModule
-        ? `Run "npm run build --prefix zenith" to compile the interest watcher (expected at ${distModule}).`
-        : 'Interest watcher dist module path is not configured.';
-      const error = new Error(`Interest watcher module could not be loaded. ${hint}`);
+      const hints = [];
+      if (distModule) {
+        hints.push(
+          `Run "npm run build --prefix zenith" to compile the interest watcher (expected at ${distModule}).`,
+        );
+      } else {
+        hints.push('Interest watcher dist module path is not configured.');
+      }
+      if (lastError?.code === 'ERR_MODULE_NOT_FOUND' && /'tsx'/.test(lastError?.message ?? '')) {
+        hints.push('Install workspace dependencies with "npm install --prefix zenith" to enable TypeScript fallbacks.');
+      }
+      const error = new Error(`Interest watcher module could not be loaded. ${hints.join(' ')}`);
       error.cause = lastError;
       throw error;
     })();

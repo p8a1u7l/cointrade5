@@ -13,12 +13,17 @@ let tsApiPromise = null;
 
 async function loadTsSource(filePath) {
   if (!tsApiPromise) {
-    tsApiPromise = import('tsx/esm/api').then((api) => {
-      if (typeof api.register === 'function') {
-        api.register({ namespace: 'zenith-backend-signals', tsconfig: tsconfigPath });
-      }
-      return api;
-    });
+    tsApiPromise = import('tsx/esm/api')
+      .then((api) => {
+        if (typeof api?.tsImport !== 'function') {
+          throw new Error('tsx runtime does not expose tsImport()');
+        }
+        return api;
+      })
+      .catch((error) => {
+        tsApiPromise = null;
+        throw error;
+      });
   }
 
   const api = await tsApiPromise;
@@ -49,8 +54,13 @@ async function loadSignalsModule() {
         }
       }
 
-      const hint = `Signals build not found at ${distPath}. Run "npm run build --prefix zenith" before starting the backend.`;
-      const error = new Error(hint);
+      const hints = [
+        `Signals build not found at ${distPath}. Run "npm run build --prefix zenith" before starting the backend.`,
+      ];
+      if (lastError?.code === 'ERR_MODULE_NOT_FOUND' && /'tsx'/.test(lastError?.message ?? '')) {
+        hints.push('Install workspace dependencies with "npm install --prefix zenith" to enable TypeScript fallbacks.');
+      }
+      const error = new Error(hints.join(' '));
       error.cause = lastError;
       throw error;
     })();
