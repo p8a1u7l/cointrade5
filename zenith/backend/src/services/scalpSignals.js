@@ -2,24 +2,45 @@ import fs from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 const DIST_RELATIVE = '../../dist/packages/signals/src/index.js';
+const SRC_RELATIVE = '../../packages/signals/src/index.ts';
 
-const modulePath = fileURLToPath(new URL(DIST_RELATIVE, import.meta.url));
+const distPath = fileURLToPath(new URL(DIST_RELATIVE, import.meta.url));
+const srcPath = fileURLToPath(new URL(SRC_RELATIVE, import.meta.url));
+
 let cachedModulePromise = null;
-
-function ensureBuiltArtifact() {
-  if (!fs.existsSync(modulePath)) {
-    throw new Error(
-      `Signals build not found at ${modulePath}. Run "npm run build --prefix zenith" before starting the backend.`
-    );
-  }
-}
+let tsLoaderReady = false;
 
 async function loadSignalsModule() {
-  if (!cachedModulePromise) {
-    ensureBuiltArtifact();
-    cachedModulePromise = import(pathToFileURL(modulePath).href);
+  if (cachedModulePromise) {
+    return cachedModulePromise;
   }
-  return cachedModulePromise;
+
+  const candidates = [];
+  if (fs.existsSync(distPath)) {
+    candidates.push({ type: 'js', path: distPath });
+  }
+  if (fs.existsSync(srcPath)) {
+    candidates.push({ type: 'ts', path: srcPath });
+  }
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      if (candidate.type === 'ts' && !tsLoaderReady) {
+        await import('tsx/esm');
+        tsLoaderReady = true;
+      }
+      cachedModulePromise = import(pathToFileURL(candidate.path).href);
+      return cachedModulePromise;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const hint = `Signals build not found at ${distPath}. Run "npm run build --prefix zenith" before starting the backend.`;
+  const error = new Error(hint);
+  error.cause = lastError;
+  throw error;
 }
 
 export async function runScalpLoop(exchange, symbol) {
