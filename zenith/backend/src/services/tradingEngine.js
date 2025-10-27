@@ -9,7 +9,7 @@ import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
 import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
 import { runScalpLoop, updateScalpInterest } from './scalpSignals.js';
-import { getInterestHotlist, normalizeTopMovers } from './interestHotlist.js';
+import { fetchTrendingSymbols } from './trendingSymbols.js';
 import { alignInterestEntries } from './interestSymbolResolver.js';
 
 const BASE_ORDER_NOTIONAL = 40;
@@ -44,9 +44,6 @@ const getErrorMessage = (error) => {
 
 const isPercentPriceError = (error) => PERCENT_PRICE_ERROR_REGEX.test(getErrorMessage(error));
 const isMaxPositionError = (error) => MAX_POSITION_ERROR_REGEX.test(getErrorMessage(error));
-const isInterestWatcherUnavailable = (error) =>
-  /interest\s+watcher\s+module\s+could\s+not\s+be\s+loaded/i.test(getErrorMessage(error));
-
 const toNumber = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
@@ -113,7 +110,7 @@ export class TradingEngine extends TypedEventEmitter {
     );
     this.activeSymbols = [...this.baseSymbols];
     this.cachedTopMovers = [];
-    this.cachedInterestHot = { updatedAt: 0, entries: [], totals: [] };
+    this.cachedTrending = { updatedAt: 0, entries: [], raw: [] };
     this.lastSymbolRefresh = 0;
     this.riskLevel = 3;
     this.leverageRange = {
@@ -128,7 +125,6 @@ export class TradingEngine extends TypedEventEmitter {
     this.allocationPercent = config.trading.userControls.defaultAllocationPct;
     this.running = false;
     this.loopTimer = undefined;
-    this._lastHotlistAt = 0;
     this.binance = new BinanceClient();
     this.scalpExchange = createBinanceExchangeAdapter(this.binance);
     this.defaultStrategyMode = 'scalp';
@@ -146,7 +142,7 @@ export class TradingEngine extends TypedEventEmitter {
     this.aiRevalidationMs = 240_000;
     this.baseSymbolsValidated = false;
     this.blockedSymbols = new Set();
-    this._getInterestHotlist = getInterestHotlist;
+    this._getTrendingSymbols = fetchTrendingSymbols;
     this._updateScalpInterest = updateScalpInterest;
     this.setStrategyMode(configuredMode);
 
@@ -165,111 +161,65 @@ export class TradingEngine extends TypedEventEmitter {
     return [...this.cachedTopMovers];
   }
 
-  getInterestHotlistSnapshot() {
-    const snapshot = this.cachedInterestHot ?? { entries: [], totals: [], updatedAt: 0 };
+  getTrendingSnapshot() {
+    const snapshot = this.cachedTrending ?? { entries: [], raw: [], updatedAt: 0 };
     return {
       updatedAt: snapshot.updatedAt ?? 0,
       entries: Array.isArray(snapshot.entries) ? [...snapshot.entries] : [],
-      totals: Array.isArray(snapshot.totals) ? [...snapshot.totals] : [],
+      raw: Array.isArray(snapshot.raw) ? [...snapshot.raw] : [],
     };
+  }
+
+  // @deprecated – maintained for compatibility with legacy callers.
+  getInterestHotlistSnapshot() {
+    return this.getTrendingSnapshot();
   }
 
   invalidatePositionCache() {
     this.positionCache = { timestamp: 0, map: new Map() };
   }
 
-  async refreshInterestHotlist(force = false) {
-    const nowTs = Date.now();
-    if (!this._lastHotlistAt) this._lastHotlistAt = 0;
-    const minInterval = Number(process.env.ENGINE_HOTLIST_MIN_INTERVAL_MS ?? 600_000);
-    if (!force && nowTs - this._lastHotlistAt < minInterval) {
-      return this.cachedInterestHot;
-    }
+  async refreshTrendingSymbols(force = false) {
     try {
-      const payload = await this._getInterestHotlist({ force });
-      this._lastHotlistAt = Date.now();
-      let normalized = payload;
+      const payload = await this._getTrendingSymbols({ force });
+      const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+      const raw = Array.isArray(payload?.raw) ? payload.raw : [];
+      const updatedAt = Number(payload?.updatedAt) || Date.now();
 
-      if (Array.isArray(payload)) {
-        normalized = {
-          entries: [],
-          totals: [],
-          updatedAt: Date.now(),
-          news: payload,
-        };
-      } else if (payload && Array.isArray(payload.entries) && payload.entries.length > 0) {
+      let resolvedEntries = entries;
+      if (entries.length > 0) {
         try {
           const exchangeInfo = await this.binance.loadExchangeInfo();
           const quotePriority = config.binance.symbolDiscovery?.quoteAssets ?? ['USDT'];
-          const resolvedEntries = alignInterestEntries(payload.entries, exchangeInfo, quotePriority, {
+          resolvedEntries = alignInterestEntries(entries, exchangeInfo, quotePriority, {
             onDiscard: (entry) => {
-              logger.debug({ entry }, 'Discarded interest entry without tradable Binance symbol');
+              logger.debug({ entry }, 'Discarded trending entry without tradable Binance symbol');
             },
           });
-
-          const totals = Array.isArray(payload.totals)
-            ? payload.totals.filter((item) => {
-                const symbol = typeof item?.symbol === 'string' ? item.symbol.toUpperCase() : '';
-                return resolvedEntries.some((entry) => entry.symbol === symbol || entry.tradingSymbol === symbol);
-              })
-            : [];
-
-          normalized = {
-            ...payload,
-            entries: resolvedEntries,
-            totals,
-          };
         } catch (error) {
-          logger.warn({ error }, 'Unable to align interest hotlist with Binance symbols');
-          normalized = { ...payload, entries: [], totals: [] };
+          logger.warn({ error }, 'Unable to align trending symbols with Binance pairs');
+          resolvedEntries = [];
         }
       }
 
-      this.cachedInterestHot = normalized;
+      this.cachedTrending = {
+        updatedAt,
+        entries: resolvedEntries,
+        raw,
+      };
+
       if (this.strategyMode === 'scalp') {
         try {
-          await this._updateScalpInterest(normalized.entries ?? []);
+          await this._updateScalpInterest(resolvedEntries);
         } catch (error) {
-          logger.warn({ error }, 'Unable to pass interest hotlist to scalping module');
+          logger.warn({ error }, 'Unable to provide trending symbols to scalping module');
         }
       }
-      return normalized;
+
+      return this.cachedTrending;
     } catch (error) {
-      if (isInterestWatcherUnavailable(error)) {
-        logger.warn('Interest watcher unavailable, falling back to Binance volatility hotlist');
-        logger.debug({ error }, 'Interest watcher failure details');
-        try {
-          const discovery = config.binance.symbolDiscovery ?? {};
-          const limit = clamp(Number(discovery.topMoverLimit ?? 40), 10, 100);
-          const fallbackMovers = await this.binance.fetchTopMovers({
-            limit,
-            minQuoteVolume: discovery.minQuoteVolume,
-            quoteAssets: discovery.quoteAssets,
-          });
-          const fallback = normalizeTopMovers(fallbackMovers);
-          this.cachedInterestHot = fallback;
-          this._lastHotlistAt = Date.now();
-          if (this.strategyMode === 'scalp') {
-            try {
-              await this._updateScalpInterest(fallback.entries ?? []);
-            } catch (interestError) {
-              logger.warn(
-                { error: interestError },
-                'Unable to pass fallback interest hotlist to scalping module',
-              );
-            }
-          }
-          return fallback;
-        } catch (fallbackError) {
-          logger.warn(
-            { error: fallbackError },
-            'Fallback Binance volatility hotlist generation failed',
-          );
-        }
-      } else {
-        logger.warn({ error }, 'Failed to refresh interest hotlist');
-      }
-      return this.cachedInterestHot;
+      logger.warn({ error }, 'Failed to refresh Binance trending symbols');
+      return this.cachedTrending;
     }
   }
 
@@ -432,9 +382,9 @@ export class TradingEngine extends TypedEventEmitter {
       }
     }
 
-    const interestSnapshot = await this.refreshInterestHotlist(options.force === true);
-    const interestSymbols = Array.isArray(interestSnapshot?.entries)
-      ? interestSnapshot.entries
+    const trendSnapshot = await this.refreshTrendingSymbols(options.force === true);
+    const trendSymbols = Array.isArray(trendSnapshot?.entries)
+      ? trendSnapshot.entries
           .map((entry) => String(entry?.tradingSymbol ?? '').toUpperCase())
           .filter((symbol) => VALID_SYMBOL_REGEX.test(symbol))
       : [];
@@ -442,7 +392,7 @@ export class TradingEngine extends TypedEventEmitter {
     if (!enabled) {
       const merged = Array.from(
         new Set([
-          ...interestSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
+          ...trendSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
           ...this.baseSymbols,
         ])
       );
@@ -454,10 +404,10 @@ export class TradingEngine extends TypedEventEmitter {
     const intervalMs = Math.max(30_000, Number(discovery.refreshIntervalSeconds ?? 180) * 1000);
     const force = options.force === true;
     if (!force && now - this.lastSymbolRefresh < intervalMs) {
-      if (interestSymbols.length > 0) {
+      if (trendSymbols.length > 0) {
         const merged = Array.from(
           new Set([
-            ...interestSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
+            ...trendSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
             ...this.activeSymbols,
           ])
         );
@@ -511,7 +461,7 @@ export class TradingEngine extends TypedEventEmitter {
         addBaseSymbol(symbol);
       }
 
-      const prioritizedInterest = interestSymbols.filter((symbol) => !blocked.has(symbol));
+      const prioritizedInterest = trendSymbols.filter((symbol) => !blocked.has(symbol));
       const limitedDynamics = dynamicCandidates.slice(0, dynamicQuota > 0 ? dynamicQuota : routeLimit);
       const nextSymbols = Array.from(new Set([...prioritizedInterest, ...trimmedBase, ...limitedDynamics]));
       if (nextSymbols.length > configuredMax) {

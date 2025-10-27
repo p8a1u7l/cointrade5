@@ -62,7 +62,7 @@ function inferBaseSymbol(symbol, quoteAsset) {
   return upper.replace(/(USDT|USDC|USD)$/i, '');
 }
 
-function computeFallbackScore({ changePct, volatilityPct, quoteVolume }) {
+function computeTrendScore({ changePct, volatilityPct, quoteVolume }) {
   const volatility = Number.isFinite(volatilityPct) ? Math.max(volatilityPct, 0) : 0;
   const change = Number.isFinite(changePct) ? Math.abs(changePct) : 0;
   const volumeBoost = Number.isFinite(quoteVolume) && quoteVolume > 0 ? Math.log10(quoteVolume + 10) : 0;
@@ -85,10 +85,10 @@ function buildReasons({ changePct, volatilityPct, quoteVolume }) {
   return reasons.slice(0, 3);
 }
 
-export function normalizeTopMovers(movers) {
+export function normalizeTrendingMovers(movers) {
   const now = Date.now();
   if (!Array.isArray(movers) || movers.length === 0) {
-    return { entries: [], totals: [], updatedAt: now };
+    return { entries: [], raw: [], updatedAt: now };
   }
 
   const entries = [];
@@ -106,7 +106,7 @@ export function normalizeTopMovers(movers) {
     const direction = mover?.direction === 'down' ? 'down' : 'up';
     const spikeScore = toNumber(mover?.spikeScore);
     const providedScore = toNumber(mover?.score);
-    const score = providedScore ?? computeFallbackScore({ changePct, volatilityPct, quoteVolume });
+    const score = providedScore ?? computeTrendScore({ changePct, volatilityPct, quoteVolume });
     const baseSymbol = inferBaseSymbol(tradingSymbol, quoteAsset);
 
     entries.push({
@@ -123,7 +123,6 @@ export function normalizeTopMovers(movers) {
       rank: index + 1,
       reasons: buildReasons({ changePct, volatilityPct, quoteVolume }),
       updatedAt: now,
-      source: 'binance-volatility-hotlist',
     });
   }
 
@@ -134,7 +133,7 @@ export function normalizeTopMovers(movers) {
 
   return {
     entries,
-    totals: [],
+    raw: movers,
     updatedAt: now,
   };
 }
@@ -163,7 +162,7 @@ let provider = defaultProvider;
 
 function createEmptyPayload() {
   const now = Date.now();
-  return { entries: [], totals: [], updatedAt: now };
+  return { entries: [], raw: [], updatedAt: now };
 }
 
 let cache = {
@@ -171,17 +170,17 @@ let cache = {
   payload: createEmptyPayload(),
 };
 
-export function __resetInterestHotlistCacheForTests() {
+export function __resetTrendingCacheForTests() {
   cache = { timestamp: 0, payload: createEmptyPayload() };
   provider = defaultProvider;
 }
 
-export function __setInterestHotlistProviderForTests(fn) {
+export function __setTrendingProviderForTests(fn) {
   provider = typeof fn === 'function' ? fn : defaultProvider;
   cache = { timestamp: 0, payload: createEmptyPayload() };
 }
 
-export async function getInterestHotlist(options = {}) {
+export async function fetchTrendingSymbols(options = {}) {
   const now = Date.now();
   const ttl = Number.isFinite(options.cacheTtlMs) ? Number(options.cacheTtlMs) : DEFAULT_CACHE_TTL_MS;
   if (!options.force && cache.payload && now - cache.timestamp < ttl) {
@@ -190,11 +189,11 @@ export async function getInterestHotlist(options = {}) {
 
   try {
     const movers = await provider(options);
-    const payload = normalizeTopMovers(movers);
+    const payload = normalizeTrendingMovers(movers);
     cache = { timestamp: now, payload };
     return payload;
   } catch (error) {
-    logger.warn({ error }, 'Failed to build Binance-derived interest hotlist');
+    logger.warn({ error }, 'Failed to fetch Binance trending symbols');
     if (!cache.payload) {
       cache = { timestamp: now, payload: createEmptyPayload() };
     }
