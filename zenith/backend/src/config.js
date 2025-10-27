@@ -54,7 +54,11 @@ const strategyMode = parseStrategyMode(process.env.STRATEGY_MODE);
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(moduleDir, '../../..');
-const defaultInterestRoot = path.resolve(repoRoot, 'interest-trend-watcher');
+const defaultInterestRoot = path.resolve(repoRoot, 'packages/interest-watcher');
+const defaultInterestDist = path.resolve(
+  repoRoot,
+  'dist/packages/interest-watcher/index.js',
+);
 
 const resolvePath = (value, fallback) => {
   const source = value && value.trim().length > 0 ? value : fallback;
@@ -143,11 +147,16 @@ export const config = {
       process.env.INTEREST_WATCHER_STATE_DIR,
       projectDir ? path.join(projectDir, '.interest_state') : undefined
     );
+    const distModule = resolvePath(
+      process.env.INTEREST_WATCHER_DIST_MODULE,
+      defaultInterestDist
+    );
     return {
       enabled,
       projectDir,
       dataDir,
       stateDir,
+      distModule,
       staleMs: parseNumber(process.env.INTEREST_WATCHER_STALE_MS, 5 * 60 * 1000),
       minScore: parseFloat(process.env.INTEREST_WATCHER_MIN_SCORE ?? '2.0'),
       quoteAsset: (process.env.INTEREST_WATCHER_QUOTE_ASSET ?? 'USDT').toUpperCase(),

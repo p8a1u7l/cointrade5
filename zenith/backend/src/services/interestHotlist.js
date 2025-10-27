@@ -6,8 +6,11 @@ import { logger } from '../utils/logger.js';
 
 const interestCfg = config.interestWatcher ?? { enabled: false };
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-const projectDir = interestCfg.projectDir ?? path.resolve(moduleDir, '../../../interest-trend-watcher');
-const distModule = projectDir ? path.resolve(projectDir, 'dist/watcher.js') : undefined;
+const projectDir = interestCfg.projectDir ?? null;
+const distModule = interestCfg.distModule ?? null;
+const tsEntry = projectDir ? path.resolve(projectDir, 'src/watcher.ts') : null;
+
+let tsLoaderReady = false;
 
 let cachedWatcherPromise = null;
 let cache = {
@@ -29,22 +32,44 @@ function ensureEnvBootstrap() {
   }
 }
 
-function ensureWatcherBuilt() {
-  if (!distModule || !fs.existsSync(distModule)) {
-    throw new Error(
-      `Interest watcher build not found at ${distModule}. Run "npm run build --prefix interest-trend-watcher" first.`
-    );
-  }
-}
-
 async function loadWatcherModule() {
   if (cachedWatcherPromise) {
     return cachedWatcherPromise;
   }
   ensureEnvBootstrap();
-  ensureWatcherBuilt();
-  cachedWatcherPromise = import(pathToFileURL(distModule).href);
-  return cachedWatcherPromise;
+  const candidates = [];
+  if (distModule) {
+    candidates.push({ type: 'js', path: distModule });
+  }
+  if (tsEntry) {
+    candidates.push({ type: 'ts', path: tsEntry });
+  }
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    if (!candidate.path || !fs.existsSync(candidate.path)) {
+      continue;
+    }
+    try {
+      if (candidate.type === 'ts') {
+        if (!tsLoaderReady) {
+          await import('tsx/esm');
+          tsLoaderReady = true;
+        }
+      }
+      cachedWatcherPromise = import(pathToFileURL(candidate.path).href);
+      return cachedWatcherPromise;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const hint = distModule
+    ? `Run "npm run build --prefix zenith" to compile the interest watcher (expected at ${distModule}).`
+    : 'Interest watcher dist module path is not configured.';
+  const error = new Error(`Interest watcher module could not be loaded. ${hint}`);
+  error.cause = lastError;
+  throw error;
 }
 
 function toTradingSymbol(symbol) {
