@@ -6,10 +6,11 @@ loadEnvFile();
 
 const parseStrategyMode = (value) => {
   const normalized = (value ?? 'scalp').toLowerCase();
-  if (normalized !== 'scalp') {
-    process.emitWarning(
-      `Requested STRATEGY_MODE "${value}" is not supported. Falling back to perpetual scalp mode.`,
-    );
+  if (normalized === 'scalp' || normalized === 'llm') {
+    return normalized;
+  }
+  if (value != null) {
+    process.emitWarning(`Unknown STRATEGY_MODE "${value}", defaulting to scalp strategy.`);
   }
   return 'scalp';
 };

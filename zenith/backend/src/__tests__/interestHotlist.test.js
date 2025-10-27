@@ -82,13 +82,12 @@ test('interest hotlist normalises watcher payload and caches results', async (t)
   );
 });
 
-test('trading engine keeps current strategy when interest watcher is toggled', async (t) => {
+test('trading engine uses scalping as the base strategy while interest watcher toggles', async (t) => {
   await withEnv(
     {
       BINANCE_API_KEY: 'key',
       BINANCE_API_SECRET: 'secret',
       INTEREST_WATCHER_ENABLED: 'true',
-      STRATEGY_MODE: 'llm',
     },
     async () => {
       const module = await import('../services/tradingEngine.js');
@@ -101,18 +100,21 @@ test('trading engine keeps current strategy when interest watcher is toggled', a
 
       assert.equal(engine.getStrategyMode(), 'scalp');
 
-      const enforced = engine.setStrategyMode('llm');
-      assert.equal(enforced, 'scalp');
-      assert.equal(engine.getStrategyMode(), 'scalp');
-
       const disabled = engine.setInterestWatcherEnabled(false);
       assert.equal(disabled.enabled, false);
       assert.equal(disabled.strategyMode, 'scalp');
-      assert.equal(engine.getStrategyMode(), 'scalp');
+
+      const llmMode = engine.setStrategyMode('llm');
+      assert.equal(llmMode, 'llm');
+      assert.equal(engine.getStrategyMode(), 'llm');
 
       const reenabled = engine.setInterestWatcherEnabled(true);
       assert.equal(reenabled.enabled, true);
-      assert.equal(reenabled.strategyMode, 'scalp');
+      assert.equal(reenabled.strategyMode, 'llm');
+      assert.equal(engine.getStrategyMode(), 'llm');
+
+      const fallback = engine.setStrategyMode('swing');
+      assert.equal(fallback, 'scalp');
       assert.equal(engine.getStrategyMode(), 'scalp');
     },
   );

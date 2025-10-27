@@ -128,10 +128,11 @@ export class TradingEngine extends TypedEventEmitter {
     this.loopTimer = undefined;
     this._lastHotlistAt = 0;
     this.binance = new BinanceClient();
-    this.defaultStrategyMode = 'scalp';
-    this.strategyMode = 'scalp';
-    config.trading.strategyMode = 'scalp';
     this.scalpExchange = createBinanceExchangeAdapter(this.binance);
+    this.defaultStrategyMode = 'scalp';
+    this.strategyMode = this.defaultStrategyMode;
+    const configuredMode = config.trading.strategyMode ?? this.defaultStrategyMode;
+    config.trading.strategyMode = this.defaultStrategyMode;
     this.recorder = new AnalyticsRecorder();
     this.stream = new BinanceRealtimeFeed();
     this.latestTicks = new Map();
@@ -144,6 +145,8 @@ export class TradingEngine extends TypedEventEmitter {
     this.baseSymbolsValidated = false;
     this.blockedSymbols = new Set();
     this.interestWatcherEnabled = config.interestWatcher?.enabled !== false;
+
+    this.setStrategyMode(configuredMode);
 
     this.stream.on('tick', (tick) => {
       this.latestTicks.set(tick.symbol, tick);
@@ -243,15 +246,25 @@ export class TradingEngine extends TypedEventEmitter {
   }
 
   setStrategyMode(mode) {
-    if (mode !== 'scalp') {
-      logger.warn({ requestedMode: mode }, 'Ignoring non-scalp strategy mode request');
+    const normalized = typeof mode === 'string' ? mode.toLowerCase() : '';
+    let nextMode = this.defaultStrategyMode;
+    if (normalized === 'llm' || normalized === 'scalp') {
+      nextMode = normalized;
+    } else if (normalized && normalized !== this.defaultStrategyMode) {
+      logger.warn(
+        { requestedMode: mode },
+        'Unknown strategy mode requested, defaulting to base scalping strategy',
+      );
     }
 
-    if (this.strategyMode !== 'scalp' || !this.scalpExchange) {
-      this.strategyMode = 'scalp';
-      config.trading.strategyMode = 'scalp';
+    if (nextMode === 'scalp' && !this.scalpExchange) {
       this.scalpExchange = createBinanceExchangeAdapter(this.binance);
-      logger.info({ mode: this.strategyMode }, 'Trading strategy mode enforced to scalping');
+    }
+
+    if (this.strategyMode !== nextMode) {
+      this.strategyMode = nextMode;
+      config.trading.strategyMode = nextMode;
+      logger.info({ mode: this.strategyMode }, 'Trading strategy mode updated');
     }
 
     return this.strategyMode;
