@@ -1,46 +1,77 @@
 import fs from 'fs';
+import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
-const DIST_RELATIVE = '../../dist/packages/signals/src/index.js';
-const SRC_RELATIVE = '../../packages/signals/src/index.ts';
-
-const distPath = fileURLToPath(new URL(DIST_RELATIVE, import.meta.url));
-const srcPath = fileURLToPath(new URL(SRC_RELATIVE, import.meta.url));
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(moduleDir, '../../..');
+const distPath = path.resolve(repoRoot, 'dist/packages/signals/src/index.js');
+const srcPath = path.resolve(repoRoot, 'packages/signals/src/index.ts');
+const tsconfigPath = path.resolve(repoRoot, 'tsconfig.json');
 
 let cachedModulePromise = null;
-let tsLoaderReady = false;
+let tsApiPromise = null;
+
+async function loadTsSource(filePath) {
+  if (!tsApiPromise) {
+    tsApiPromise = import('tsx/esm/api')
+      .then((api) => {
+        if (typeof api?.tsImport !== 'function') {
+          throw new Error('tsx runtime does not expose tsImport()');
+        }
+        return api;
+      })
+      .catch((error) => {
+        tsApiPromise = null;
+        throw error;
+      });
+  }
+
+  const api = await tsApiPromise;
+  const parentURL = pathToFileURL(path.join(moduleDir, 'signals-ts-loader.mjs')).href;
+  return api.tsImport(filePath, { parentURL, tsconfig: tsconfigPath });
+}
 
 async function loadSignalsModule() {
-  if (cachedModulePromise) {
-    return cachedModulePromise;
-  }
-
-  const candidates = [];
-  if (fs.existsSync(distPath)) {
-    candidates.push({ type: 'js', path: distPath });
-  }
-  if (fs.existsSync(srcPath)) {
-    candidates.push({ type: 'ts', path: srcPath });
-  }
-
-  let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      if (candidate.type === 'ts' && !tsLoaderReady) {
-        await import('tsx/esm');
-        tsLoaderReady = true;
+  if (!cachedModulePromise) {
+    cachedModulePromise = (async () => {
+      const candidates = [];
+      if (fs.existsSync(distPath)) {
+        candidates.push({ type: 'js', path: distPath });
       }
-      cachedModulePromise = import(pathToFileURL(candidate.path).href);
-      return cachedModulePromise;
-    } catch (error) {
-      lastError = error;
-    }
+      if (fs.existsSync(srcPath)) {
+        candidates.push({ type: 'ts', path: srcPath });
+      }
+
+      let lastError = null;
+      for (const candidate of candidates) {
+        try {
+          if (candidate.type === 'ts') {
+            return await loadTsSource(candidate.path);
+          }
+          return await import(pathToFileURL(candidate.path).href);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      const hints = [
+        `Signals build not found at ${distPath}. Run "npm run build --prefix zenith" before starting the backend.`,
+      ];
+      if (lastError?.code === 'ERR_MODULE_NOT_FOUND' && /'tsx'/.test(lastError?.message ?? '')) {
+        hints.push('Install workspace dependencies with "npm install --prefix zenith" to enable TypeScript fallbacks.');
+      }
+      const error = new Error(hints.join(' '));
+      error.cause = lastError;
+      throw error;
+    })();
   }
 
-  const hint = `Signals build not found at ${distPath}. Run "npm run build --prefix zenith" before starting the backend.`;
-  const error = new Error(hint);
-  error.cause = lastError;
-  throw error;
+  try {
+    return await cachedModulePromise;
+  } catch (error) {
+    cachedModulePromise = null;
+    throw error;
+  }
 }
 
 export async function runScalpLoop(exchange, symbol) {

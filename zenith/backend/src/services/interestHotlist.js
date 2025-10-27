@@ -6,13 +6,35 @@ import { logger } from '../utils/logger.js';
 
 const interestCfg = config.interestWatcher ?? { enabled: false };
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(moduleDir, '../../..');
+const tsconfigPath = path.resolve(repoRoot, 'tsconfig.json');
 const projectDir = interestCfg.projectDir ?? null;
 const distModule = interestCfg.distModule ?? null;
 const tsEntry = projectDir ? path.resolve(projectDir, 'src/watcher.ts') : null;
 
-let tsLoaderReady = false;
+let tsApiPromise = null;
 
 let cachedWatcherPromise = null;
+
+async function loadTsWatcher(filePath) {
+  if (!tsApiPromise) {
+    tsApiPromise = import('tsx/esm/api')
+      .then((api) => {
+        if (typeof api?.tsImport !== 'function') {
+          throw new Error('tsx runtime does not expose tsImport()');
+        }
+        return api;
+      })
+      .catch((error) => {
+        tsApiPromise = null;
+        throw error;
+      });
+  }
+
+  const api = await tsApiPromise;
+  const parentURL = pathToFileURL(path.join(moduleDir, 'interest-hotlist-ts-loader.mjs')).href;
+  return api.tsImport(filePath, { parentURL, tsconfig: tsconfigPath });
+}
 let cache = {
   timestamp: 0,
   payload: { entries: [], totals: [], updatedAt: 0 },
@@ -21,7 +43,7 @@ let cache = {
 export function __resetInterestHotlistCacheForTests() {
   cache = { timestamp: 0, payload: { entries: [], totals: [], updatedAt: 0 } };
   cachedWatcherPromise = null;
-  tsLoaderReady = false;
+  tsApiPromise = null;
 }
 
 function ensureEnvBootstrap() {
@@ -39,43 +61,55 @@ function ensureEnvBootstrap() {
 }
 
 async function loadWatcherModule() {
-  if (cachedWatcherPromise) {
-    return cachedWatcherPromise;
-  }
-  ensureEnvBootstrap();
-  const candidates = [];
-  if (distModule) {
-    candidates.push({ type: 'js', path: distModule });
-  }
-  if (tsEntry) {
-    candidates.push({ type: 'ts', path: tsEntry });
-  }
+  if (!cachedWatcherPromise) {
+    cachedWatcherPromise = (async () => {
+      ensureEnvBootstrap();
+      const candidates = [];
+      if (distModule) {
+        candidates.push({ type: 'js', path: distModule });
+      }
+      if (tsEntry) {
+        candidates.push({ type: 'ts', path: tsEntry });
+      }
 
-  let lastError = null;
-  for (const candidate of candidates) {
-    if (!candidate.path || !fs.existsSync(candidate.path)) {
-      continue;
-    }
-    try {
-      if (candidate.type === 'ts') {
-        if (!tsLoaderReady) {
-          await import('tsx/esm');
-          tsLoaderReady = true;
+      let lastError = null;
+      for (const candidate of candidates) {
+        if (!candidate.path || !fs.existsSync(candidate.path)) {
+          continue;
+        }
+        try {
+          if (candidate.type === 'ts') {
+            return await loadTsWatcher(candidate.path);
+          }
+          return await import(pathToFileURL(candidate.path).href);
+        } catch (error) {
+          lastError = error;
         }
       }
-      cachedWatcherPromise = import(pathToFileURL(candidate.path).href);
-      return cachedWatcherPromise;
-    } catch (error) {
-      lastError = error;
-    }
+
+      const hints = [];
+      if (distModule) {
+        hints.push(
+          `Run "npm run build --prefix zenith" to compile the interest watcher (expected at ${distModule}).`,
+        );
+      } else {
+        hints.push('Interest watcher dist module path is not configured.');
+      }
+      if (lastError?.code === 'ERR_MODULE_NOT_FOUND' && /'tsx'/.test(lastError?.message ?? '')) {
+        hints.push('Install workspace dependencies with "npm install --prefix zenith" to enable TypeScript fallbacks.');
+      }
+      const error = new Error(`Interest watcher module could not be loaded. ${hints.join(' ')}`);
+      error.cause = lastError;
+      throw error;
+    })();
   }
 
-  const hint = distModule
-    ? `Run "npm run build --prefix zenith" to compile the interest watcher (expected at ${distModule}).`
-    : 'Interest watcher dist module path is not configured.';
-  const error = new Error(`Interest watcher module could not be loaded. ${hint}`);
-  error.cause = lastError;
-  throw error;
+  try {
+    return await cachedWatcherPromise;
+  } catch (error) {
+    cachedWatcherPromise = null;
+    throw error;
+  }
 }
 
 function toTradingSymbol(symbol) {
