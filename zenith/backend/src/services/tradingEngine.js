@@ -10,6 +10,7 @@ import { getMarketSnapshot } from './marketIntelligence.js';
 import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
 import { runScalpLoop, updateScalpInterest } from './scalpSignals.js';
 import { getInterestHotlist } from './interestHotlist.js';
+import { alignInterestEntries } from './interestSymbolResolver.js';
 
 const BASE_ORDER_NOTIONAL = 40;
 const DEFAULT_CONFIDENCE_GUESS = 0.75;
@@ -175,15 +176,45 @@ export class TradingEngine extends TypedEventEmitter {
     }
     try {
       const payload = await getInterestHotlist({ force });
-      this.cachedInterestHot = payload;
+      let normalized = payload;
+
+      if (payload && Array.isArray(payload.entries) && payload.entries.length > 0) {
+        try {
+          const exchangeInfo = await this.binance.loadExchangeInfo();
+          const quotePriority = config.binance.symbolDiscovery?.quoteAssets ?? ['USDT'];
+          const resolvedEntries = alignInterestEntries(payload.entries, exchangeInfo, quotePriority, {
+            onDiscard: (entry) => {
+              logger.debug({ entry }, 'Discarded interest entry without tradable Binance symbol');
+            },
+          });
+
+          const totals = Array.isArray(payload.totals)
+            ? payload.totals.filter((item) => {
+                const symbol = typeof item?.symbol === 'string' ? item.symbol.toUpperCase() : '';
+                return resolvedEntries.some((entry) => entry.symbol === symbol || entry.tradingSymbol === symbol);
+              })
+            : [];
+
+          normalized = {
+            ...payload,
+            entries: resolvedEntries,
+            totals,
+          };
+        } catch (error) {
+          logger.warn({ error }, 'Unable to align interest hotlist with Binance symbols');
+          normalized = { ...payload, entries: [], totals: [] };
+        }
+      }
+
+      this.cachedInterestHot = normalized;
       if (this.strategyMode === 'scalp') {
         try {
-          await updateScalpInterest(payload.entries ?? []);
+          await updateScalpInterest(normalized.entries ?? []);
         } catch (error) {
           logger.warn({ error }, 'Unable to pass interest hotlist to scalping module');
         }
       }
-      return payload;
+      return normalized;
     } catch (error) {
       logger.warn({ error }, 'Failed to refresh interest hotlist');
       return this.cachedInterestHot;

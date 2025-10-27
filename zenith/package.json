@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json --noEmit && tsx --test packages/signals/src/__tests__/*.test.ts"
+    "test": "tsc -p tsconfig.json --noEmit && tsx --test packages/signals/src/__tests__/*.test.ts && node --test backend/src/__tests__/*.test.js"
   },
   "dependencies": {
     "axios": "^1.7.4",
