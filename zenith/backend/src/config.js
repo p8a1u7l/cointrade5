@@ -1,6 +1,16 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { loadEnvFile } from './utils/env.js';
 
 loadEnvFile();
+
+const parseStrategyMode = (value) => {
+  const normalized = (value ?? 'scalp').toLowerCase();
+  if (normalized === 'scalp' || normalized === 'llm') {
+    return normalized;
+  }
+  return 'scalp';
+};
 
 const requireEnv = (name) => {
   const value = process.env[name];
@@ -40,6 +50,25 @@ const parseList = (value, fallback) => {
     .filter((entry) => entry.length > 0);
 };
 
+const strategyMode = parseStrategyMode(process.env.STRATEGY_MODE);
+
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(moduleDir, '../../..');
+const defaultInterestRoot = path.resolve(repoRoot, 'packages/interest-watcher');
+const defaultInterestDist = path.resolve(
+  repoRoot,
+  'dist/packages/interest-watcher/index.js',
+);
+
+const resolvePath = (value, fallback) => {
+  const source = value && value.trim().length > 0 ? value : fallback;
+  if (!source) return undefined;
+  if (path.isAbsolute(source)) {
+    return source;
+  }
+  return path.resolve(repoRoot, source);
+};
+
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: parseNumber(process.env.PORT, 8080),
@@ -59,9 +88,10 @@ export const config = {
     },
   },
   openAi: {
-    apiKey: requireEnv('OPENAI_API_KEY'),
+    apiKey: strategyMode === 'scalp' ? process.env.OPENAI_API_KEY ?? '' : requireEnv('OPENAI_API_KEY'),
   },
   trading: {
+    strategyMode,
     initialBalance: parseNumber(process.env.INITIAL_BALANCE, 100_000),
     loopIntervalSeconds: parseNumber(process.env.LOOP_INTERVAL_SECONDS, 30),
     maxPositionLeverage: parseNumber(process.env.MAX_POSITION_LEVERAGE, 5),
@@ -103,4 +133,34 @@ export const config = {
   logging: {
     level: process.env.LOG_LEVEL ?? 'info',
   },
+  interestWatcher: (() => {
+    const enabled = (process.env.INTEREST_WATCHER_ENABLED ?? 'true') === 'true';
+    const projectDir = resolvePath(
+      process.env.INTEREST_WATCHER_PROJECT_DIR,
+      defaultInterestRoot
+    );
+    const dataDir = resolvePath(
+      process.env.INTEREST_WATCHER_DATA_DIR,
+      projectDir ? path.join(projectDir, 'news_interest') : undefined
+    );
+    const stateDir = resolvePath(
+      process.env.INTEREST_WATCHER_STATE_DIR,
+      projectDir ? path.join(projectDir, '.interest_state') : undefined
+    );
+    const distModule = resolvePath(
+      process.env.INTEREST_WATCHER_DIST_MODULE,
+      defaultInterestDist
+    );
+    return {
+      enabled,
+      projectDir,
+      dataDir,
+      stateDir,
+      distModule,
+      staleMs: parseNumber(process.env.INTEREST_WATCHER_STALE_MS, 5 * 60 * 1000),
+      minScore: parseFloat(process.env.INTEREST_WATCHER_MIN_SCORE ?? '2.0'),
+      quoteAsset: (process.env.INTEREST_WATCHER_QUOTE_ASSET ?? 'USDT').toUpperCase(),
+      maxSymbols: parseNumber(process.env.INTEREST_WATCHER_MAX_SYMBOLS, 8),
+    };
+  })(),
 };

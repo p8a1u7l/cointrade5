@@ -7,6 +7,10 @@ import { logger } from '../utils/logger.js';
 import { TypedEventEmitter } from '../utils/eventEmitter.js';
 import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
+import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
+import { runScalpLoop, updateScalpInterest } from './scalpSignals.js';
+import { getInterestHotlist } from './interestHotlist.js';
+import { alignInterestEntries } from './interestSymbolResolver.js';
 
 const BASE_ORDER_NOTIONAL = 40;
 const DEFAULT_CONFIDENCE_GUESS = 0.75;
@@ -107,6 +111,7 @@ export class TradingEngine extends TypedEventEmitter {
     );
     this.activeSymbols = [...this.baseSymbols];
     this.cachedTopMovers = [];
+    this.cachedInterestHot = { updatedAt: 0, entries: [], totals: [] };
     this.lastSymbolRefresh = 0;
     this.riskLevel = 3;
     this.leverageRange = {
@@ -122,6 +127,10 @@ export class TradingEngine extends TypedEventEmitter {
     this.running = false;
     this.loopTimer = undefined;
     this.binance = new BinanceClient();
+    this.strategyMode = config.trading.strategyMode ?? 'llm';
+    this.scalpExchange = this.strategyMode === 'scalp'
+      ? createBinanceExchangeAdapter(this.binance)
+      : null;
     this.recorder = new AnalyticsRecorder();
     this.stream = new BinanceRealtimeFeed();
     this.latestTicks = new Map();
@@ -148,8 +157,68 @@ export class TradingEngine extends TypedEventEmitter {
     return [...this.cachedTopMovers];
   }
 
+  getInterestHotlistSnapshot() {
+    const snapshot = this.cachedInterestHot ?? { entries: [], totals: [], updatedAt: 0 };
+    return {
+      updatedAt: snapshot.updatedAt ?? 0,
+      entries: Array.isArray(snapshot.entries) ? [...snapshot.entries] : [],
+      totals: Array.isArray(snapshot.totals) ? [...snapshot.totals] : [],
+    };
+  }
+
   invalidatePositionCache() {
     this.positionCache = { timestamp: 0, map: new Map() };
+  }
+
+  async refreshInterestHotlist(force = false) {
+    if (!config.interestWatcher || config.interestWatcher.enabled === false) {
+      return this.cachedInterestHot;
+    }
+    try {
+      const payload = await getInterestHotlist({ force });
+      let normalized = payload;
+
+      if (payload && Array.isArray(payload.entries) && payload.entries.length > 0) {
+        try {
+          const exchangeInfo = await this.binance.loadExchangeInfo();
+          const quotePriority = config.binance.symbolDiscovery?.quoteAssets ?? ['USDT'];
+          const resolvedEntries = alignInterestEntries(payload.entries, exchangeInfo, quotePriority, {
+            onDiscard: (entry) => {
+              logger.debug({ entry }, 'Discarded interest entry without tradable Binance symbol');
+            },
+          });
+
+          const totals = Array.isArray(payload.totals)
+            ? payload.totals.filter((item) => {
+                const symbol = typeof item?.symbol === 'string' ? item.symbol.toUpperCase() : '';
+                return resolvedEntries.some((entry) => entry.symbol === symbol || entry.tradingSymbol === symbol);
+              })
+            : [];
+
+          normalized = {
+            ...payload,
+            entries: resolvedEntries,
+            totals,
+          };
+        } catch (error) {
+          logger.warn({ error }, 'Unable to align interest hotlist with Binance symbols');
+          normalized = { ...payload, entries: [], totals: [] };
+        }
+      }
+
+      this.cachedInterestHot = normalized;
+      if (this.strategyMode === 'scalp') {
+        try {
+          await updateScalpInterest(normalized.entries ?? []);
+        } catch (error) {
+          logger.warn({ error }, 'Unable to pass interest hotlist to scalping module');
+        }
+      }
+      return normalized;
+    } catch (error) {
+      logger.warn({ error }, 'Failed to refresh interest hotlist');
+      return this.cachedInterestHot;
+    }
   }
 
   invalidateBalanceCache() {
@@ -281,8 +350,22 @@ export class TradingEngine extends TypedEventEmitter {
         logger.error({ error }, 'Failed to validate base Binance symbols');
       }
     }
+
+    const interestSnapshot = await this.refreshInterestHotlist(options.force === true);
+    const interestSymbols = Array.isArray(interestSnapshot?.entries)
+      ? interestSnapshot.entries
+          .map((entry) => String(entry?.tradingSymbol ?? '').toUpperCase())
+          .filter((symbol) => VALID_SYMBOL_REGEX.test(symbol))
+      : [];
+
     if (!enabled) {
-      this._updateActiveSymbols(this.baseSymbols);
+      const merged = Array.from(
+        new Set([
+          ...interestSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
+          ...this.baseSymbols,
+        ])
+      );
+      this._updateActiveSymbols(merged);
       return { symbols: this.getActiveSymbols(), movers: [] };
     }
 
@@ -290,6 +373,15 @@ export class TradingEngine extends TypedEventEmitter {
     const intervalMs = Math.max(30_000, Number(discovery.refreshIntervalSeconds ?? 180) * 1000);
     const force = options.force === true;
     if (!force && now - this.lastSymbolRefresh < intervalMs) {
+      if (interestSymbols.length > 0) {
+        const merged = Array.from(
+          new Set([
+            ...interestSymbols.filter((symbol) => !this.blockedSymbols.has(symbol)),
+            ...this.activeSymbols,
+          ])
+        );
+        this._updateActiveSymbols(merged);
+      }
       return { symbols: this.getActiveSymbols(), movers: this.getTopMovers() };
     }
 
@@ -338,8 +430,9 @@ export class TradingEngine extends TypedEventEmitter {
         addBaseSymbol(symbol);
       }
 
+      const prioritizedInterest = interestSymbols.filter((symbol) => !blocked.has(symbol));
       const limitedDynamics = dynamicCandidates.slice(0, dynamicQuota > 0 ? dynamicQuota : routeLimit);
-      const nextSymbols = Array.from(new Set([...trimmedBase, ...limitedDynamics]));
+      const nextSymbols = Array.from(new Set([...prioritizedInterest, ...trimmedBase, ...limitedDynamics]));
       if (nextSymbols.length > configuredMax) {
         nextSymbols.length = configuredMax;
       }
@@ -476,7 +569,7 @@ export class TradingEngine extends TypedEventEmitter {
       this.running = true;
       this.scheduleNextLoop(0);
       this.emit('started');
-      logger.info({ symbols: this.getActiveSymbols() }, 'Trading engine started');
+      logger.info({ symbols: this.getActiveSymbols(), mode: this.strategyMode }, 'Trading engine started');
     } catch (error) {
       this.stream.stop();
       throw error;
@@ -527,12 +620,25 @@ export class TradingEngine extends TypedEventEmitter {
         await this.captureEquitySnapshot();
         return;
       }
-      for (const symbol of symbols) {
-        try {
-          const decision = await this.evaluateSymbol(symbol);
-          await this.executeDecision(decision);
-        } catch (error) {
-          logger.error({ error, symbol }, 'Failed to execute trading decision');
+      if (this.strategyMode === 'scalp') {
+        if (!this.scalpExchange) {
+          throw new Error('Scalping mode active but exchange adapter was not initialised');
+        }
+        for (const symbol of symbols) {
+          try {
+            await runScalpLoop(this.scalpExchange, symbol);
+          } catch (error) {
+            logger.error({ error, symbol }, 'Failed to run scalping loop');
+          }
+        }
+      } else {
+        for (const symbol of symbols) {
+          try {
+            const decision = await this.evaluateSymbol(symbol);
+            await this.executeDecision(decision);
+          } catch (error) {
+            logger.error({ error, symbol }, 'Failed to execute trading decision');
+          }
         }
       }
       await this.captureEquitySnapshot();
@@ -874,12 +980,58 @@ export class TradingEngine extends TypedEventEmitter {
       DEFAULT_CONFIDENCE_GUESS,
       this.getCachedAvailableMargin()
     );
-    const llmDecision = await requestStrategy(symbol, contextForAi, {
-      riskLevel: this.riskLevel,
-      leverage: leveragePreset,
-      allocationPercent: this.getAllocationPercent(),
-      estimatedNotional,
-    });
+    let llmDecision;
+    try {
+      llmDecision = await requestStrategy(symbol, contextForAi, {
+        riskLevel: this.riskLevel,
+        leverage: leveragePreset,
+        allocationPercent: this.getAllocationPercent(),
+        estimatedNotional,
+      });
+    } catch (error) {
+      logger.error({ error, symbol }, 'Failed to request OpenAI decision, applying fallback');
+
+      const fallbackBase = position
+        ? {
+            symbol,
+            bias: 'flat',
+            action: 'exit',
+            closeBias: position.side,
+            confidence: clampConfidence(Math.max(localConfidence, 0.8), 0.8),
+            reasoning: 'LLM decision unavailable — flattening via limit exit',
+            entryPrice: Number.isFinite(position?.entryPrice) ? position.entryPrice : undefined,
+            referencePrice: priceReference,
+            timestamp: new Date().toISOString(),
+            source: 'fallback',
+          }
+        : {
+            symbol,
+            bias: 'flat',
+            action: 'hold',
+            confidence: clampConfidence(localConfidence, 0.2),
+            reasoning: 'LLM decision unavailable — standing aside',
+            referencePrice: priceReference,
+            timestamp: new Date().toISOString(),
+            source: 'fallback',
+          };
+
+      const fallbackDecision = applyPositionContext({
+        ...fallbackBase,
+        localEdge,
+        localConfidence,
+        localBias: localSignal.bias,
+      });
+
+      this.decisionCache.set(symbol, {
+        decision: fallbackDecision,
+        price: priceReference,
+        timestamp: now,
+        source: 'fallback',
+        contextSnapshot: promptSnapshot ?? null,
+      });
+
+      return fallbackDecision;
+    }
     const enhanced = {
       ...llmDecision,
       bias: llmDecision.bias ?? localSignal.bias,
@@ -1180,7 +1332,22 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const tick = this.latestTicks.get(decision.symbol);
-    const referencePrice = Number.isFinite(decision.referencePrice)
+    const explicitExitPrice = [
+      decision.exitPrice,
+      decision.closePrice,
+      decision.limitPrice,
+      decision.targetPrice,
+      decision.orderPrice,
+      decision.desiredPrice,
+      decision.price,
+      decision.referencePrice,
+    ]
+      .map((value) => toNumber(value))
+      .find((value) => Number.isFinite(value) && value > 0);
+
+    const referencePrice = Number.isFinite(explicitExitPrice)
+      ? explicitExitPrice
+      : Number.isFinite(decision.referencePrice)
       ? decision.referencePrice
       : Number.isFinite(tick?.price)
       ? tick.price
@@ -1194,9 +1361,25 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     const quantityParam = normalized?.quantityText ?? Number(exitQuantity.toFixed(6));
-    const result = await this.binance.placeMarketOrder(decision.symbol, orderSide, quantityParam, {
+    const exitPrice = Number.isFinite(explicitExitPrice)
+      ? explicitExitPrice
+      : Number.isFinite(referencePrice)
+      ? referencePrice
+      : Number.isFinite(tick?.price)
+      ? tick.price
+      : Number.isFinite(position.entryPrice)
+      ? position.entryPrice
+      : undefined;
+
+    if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
+      logger.warn({ decision, referencePrice, position }, 'Skipping exit due to missing price reference');
+      return;
+    }
+
+    const result = await this.binance.placeLimitOrder(decision.symbol, orderSide, quantityParam, exitPrice, {
       responseType: 'RESULT',
       reduceOnly: true,
+      timeInForce: 'GTC',
     });
     const exitEntryPrice = Number.isFinite(decision.entryPrice)
       ? decision.entryPrice
@@ -1229,7 +1412,7 @@ export class TradingEngine extends TypedEventEmitter {
     );
     this.invalidatePositionCache();
     this.invalidateBalanceCache();
-    logger.info({ decision, result }, 'Closed position via strategy exit');
+    logger.info({ decision, result, exitPrice }, 'Closed position via strategy exit');
   }
 
   calculateOrderSize(symbol, leverage, confidence, referencePrice, availableOverride) {
