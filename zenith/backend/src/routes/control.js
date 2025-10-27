@@ -59,30 +59,6 @@ export function createControlRouter(engine) {
     }
   });
 
-  router.get('/interest-watcher', (_req, res) => {
-    const status = engine.getInterestWatcherStatus();
-    res.json({
-      enabled: status.enabled,
-      reason: status.reason ?? null,
-      strategyMode: engine.getStrategyMode(),
-    });
-  });
-
-  router.post('/interest-watcher/:state', (req, res) => {
-    const state = String(req.params.state ?? '').toLowerCase();
-    if (state !== 'enable' && state !== 'disable') {
-      res.status(400).json({ error: 'State must be either "enable" or "disable"' });
-      return;
-    }
-
-    const toggled = engine.setInterestWatcherEnabled(state === 'enable');
-    res.status(200).json({
-      enabled: toggled.enabled,
-      reason: toggled.reason ?? null,
-      strategyMode: toggled.strategyMode,
-    });
-  });
-
   router.get('/state', (_req, res) => {
     res.json({
       running: engine.isRunning(),

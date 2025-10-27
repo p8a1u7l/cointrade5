@@ -9,11 +9,7 @@ import { fetchEquitySnapshot } from './equitySnapshot.js';
 import { getMarketSnapshot } from './marketIntelligence.js';
 import { createBinanceExchangeAdapter } from './scalpExchangeAdapter.js';
 import { runScalpLoop, updateScalpInterest } from './scalpSignals.js';
-import {
-  getInterestHotlist,
-  getInterestWatcherStatus,
-  setInterestWatcherEnabled as applyInterestWatcherEnabled,
-} from './interestHotlist.js';
+import { getInterestHotlist } from './interestHotlist.js';
 import { alignInterestEntries } from './interestSymbolResolver.js';
 
 const BASE_ORDER_NOTIONAL = 40;
@@ -148,10 +144,6 @@ export class TradingEngine extends TypedEventEmitter {
     this.aiRevalidationMs = 240_000;
     this.baseSymbolsValidated = false;
     this.blockedSymbols = new Set();
-    const interestWatcherStatus = getInterestWatcherStatus();
-    this.interestWatcherEnabled = interestWatcherStatus.enabled !== false;
-    this.lastInterestWatcherReason = interestWatcherStatus.reason ?? null;
-
     this.setStrategyMode(configuredMode);
 
     this.stream.on('tick', (tick) => {
@@ -178,23 +170,11 @@ export class TradingEngine extends TypedEventEmitter {
     };
   }
 
-  getInterestWatcherStatus() {
-    const status = this._updateInterestWatcherStatus({ logOnChange: false });
-    return {
-      enabled: status.enabled !== false,
-      reason: status.reason ?? null,
-    };
-  }
-
   invalidatePositionCache() {
     this.positionCache = { timestamp: 0, map: new Map() };
   }
 
   async refreshInterestHotlist(force = false) {
-    if (!this.isInterestWatcherEnabled()) {
-      this._updateInterestWatcherStatus({ logOnChange: false });
-      return this.cachedInterestHot;
-    }
     const nowTs = Date.now();
     if (!this._lastHotlistAt) this._lastHotlistAt = 0;
     const minInterval = Number(process.env.ENGINE_HOTLIST_MIN_INTERVAL_MS ?? 600_000);
@@ -203,7 +183,6 @@ export class TradingEngine extends TypedEventEmitter {
     }
     try {
       const payload = await getInterestHotlist({ force });
-      this._updateInterestWatcherStatus({ logOnChange: true });
       this._lastHotlistAt = Date.now();
       let normalized = payload;
 
@@ -253,7 +232,6 @@ export class TradingEngine extends TypedEventEmitter {
       return normalized;
     } catch (error) {
       logger.warn({ error }, 'Failed to refresh interest hotlist');
-      this._updateInterestWatcherStatus({ logOnChange: true });
       return this.cachedInterestHot;
     }
   }
@@ -285,62 +263,6 @@ export class TradingEngine extends TypedEventEmitter {
     }
 
     return this.strategyMode;
-  }
-
-  isInterestWatcherEnabled() {
-    return this.interestWatcherEnabled !== false;
-  }
-
-  setInterestWatcherEnabled(enabled) {
-    const normalized = enabled === true;
-    if (this.interestWatcherEnabled === normalized) {
-      const status = this._updateInterestWatcherStatus({ logOnChange: false });
-      return {
-        enabled: status.enabled !== false,
-        reason: status.reason ?? null,
-        strategyMode: this.getStrategyMode(),
-      };
-    }
-
-    const reason = normalized
-      ? null
-      : {
-          code: 'manual-toggle',
-          message: 'Interest watcher disabled via trading engine control',
-        };
-    applyInterestWatcherEnabled(normalized, { reason });
-    const status = this._updateInterestWatcherStatus({ logOnChange: true });
-    this._lastHotlistAt = 0;
-    this.cachedInterestHot = { updatedAt: 0, entries: [], totals: [] };
-
-    logger.info(
-      { enabled: status.enabled !== false, reason: status.reason ?? null },
-      'Interest watcher toggle applied',
-    );
-    return {
-      enabled: status.enabled !== false,
-      reason: status.reason ?? null,
-      strategyMode: this.getStrategyMode(),
-    };
-  }
-
-  _updateInterestWatcherStatus({ logOnChange = false } = {}) {
-    const status = getInterestWatcherStatus();
-    const enabled = status.enabled !== false;
-    const changed = this.interestWatcherEnabled !== enabled;
-    this.interestWatcherEnabled = enabled;
-    this.lastInterestWatcherReason = status.reason ?? null;
-    if (changed && logOnChange) {
-      if (enabled) {
-        logger.info({ reason: status.reason ?? null }, 'Interest watcher re-enabled');
-      } else {
-        logger.warn(
-          { reason: status.reason ?? null },
-          'Interest watcher disabled; continuing without watcher',
-        );
-      }
-    }
-    return status;
   }
 
   invalidateBalanceCache() {
