@@ -2,6 +2,7 @@ import '../utils/polyfills.js';
 import fs from 'fs';
 import path from 'path';
 import Module from 'node:module';
+import { Buffer } from 'node:buffer';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -9,11 +10,11 @@ const repoRoot = path.resolve(moduleDir, '../../..');
 const distRoot = path.resolve(repoRoot, 'dist');
 const distPath = path.resolve(distRoot, 'packages/signals/src/index.js');
 const srcPath = path.resolve(repoRoot, 'packages/signals/src/index.ts');
-const tsconfigPath = path.resolve(repoRoot, 'tsconfig.json');
 
 let cachedModulePromise = null;
-let tsApiPromise = null;
 let aliasesRegistered = false;
+let esbuildPromise = null;
+let bundledModuleCache = null;
 
 const aliasPrefixMap = [
   {
@@ -95,8 +96,13 @@ function resolveWithExtensions(basePath) {
   }
 
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
+    try {
+      const stats = fs.existsSync(candidate) ? fs.statSync(candidate) : null;
+      if (stats?.isFile()) {
+        return candidate;
+      }
+    } catch (error) {
+      // Ignore filesystem race conditions and continue to the next candidate.
     }
   }
   return null;
@@ -149,25 +155,80 @@ function registerRepoAliases() {
   aliasesRegistered = true;
 }
 
-async function loadTsSource(filePath) {
-  registerRepoAliases();
-  if (!tsApiPromise) {
-    tsApiPromise = import('tsx/esm/api')
-      .then((api) => {
-        if (typeof api?.tsImport !== 'function') {
-          throw new Error('tsx runtime does not expose tsImport()');
-        }
-        return api;
-      })
+function loadEsbuild() {
+  if (!esbuildPromise) {
+    esbuildPromise = import('esbuild')
+      .then((mod) => (mod?.build ? mod : mod?.default))
       .catch((error) => {
-        tsApiPromise = null;
+        esbuildPromise = null;
         throw error;
       });
   }
+  return esbuildPromise;
+}
 
-  const api = await tsApiPromise;
-  const parentURL = pathToFileURL(path.join(moduleDir, 'signals-ts-loader.mjs')).href;
-  return api.tsImport(filePath, { parentURL, tsconfig: tsconfigPath });
+const esbuildAliasPlugin = {
+  name: 'scalp-signals-alias',
+  setup(build) {
+    build.onResolve({ filter: /^@repo\// }, (args) => {
+      const mapped = resolveRepoAlias(args.path);
+      if (mapped) {
+        return { path: mapped };
+      }
+      return null;
+    });
+
+    build.onResolve({ filter: /^\.\.?(?:\/|$)/ }, (args) => {
+      const absoluteTarget = path.resolve(args.resolveDir, args.path);
+      const resolved = resolveWithExtensions(absoluteTarget);
+      if (resolved) {
+        return { path: resolved };
+      }
+      return { path: absoluteTarget };
+    });
+  },
+};
+
+async function loadBundledSignalsModule() {
+  if (bundledModuleCache) {
+    return bundledModuleCache;
+  }
+
+  const esbuild = await loadEsbuild();
+  const result = await esbuild.build({
+    entryPoints: [srcPath],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    target: ['node20'],
+    sourcemap: 'inline',
+    write: false,
+    absWorkingDir: repoRoot,
+    logLevel: 'silent',
+    plugins: [esbuildAliasPlugin],
+    loader: {
+      '.ts': 'ts',
+      '.tsx': 'tsx',
+      '.js': 'js',
+      '.json': 'json',
+    },
+    resolveExtensions: ['.ts', '.tsx', '.js', '.mjs', '.cjs', '.json'],
+  });
+
+  const output = result?.outputFiles?.[0]?.text;
+  if (!output) {
+    throw new Error('esbuild failed to bundle the scalping signals module');
+  }
+
+  const dataUrl = `data:text/javascript;base64,${Buffer.from(output).toString('base64')}`;
+
+  try {
+    bundledModuleCache = await import(dataUrl);
+    return bundledModuleCache;
+  } catch (error) {
+    bundledModuleCache = null;
+    throw error;
+  }
 }
 
 async function loadSignalsModule() {
@@ -179,14 +240,14 @@ async function loadSignalsModule() {
         candidates.push({ type: 'js', path: distPath });
       }
       if (fs.existsSync(srcPath)) {
-        candidates.push({ type: 'ts', path: srcPath });
+        candidates.push({ type: 'bundle', path: srcPath });
       }
 
       let lastError = null;
       for (const candidate of candidates) {
         try {
-          if (candidate.type === 'ts') {
-            return await loadTsSource(candidate.path);
+          if (candidate.type === 'bundle') {
+            return await loadBundledSignalsModule();
           }
           return await import(pathToFileURL(candidate.path).href);
         } catch (error) {
@@ -194,11 +255,14 @@ async function loadSignalsModule() {
         }
       }
 
-      const hints = [
-        `Signals build not found at ${distPath}. Run "npm run build --prefix zenith" before starting the backend.`,
-      ];
-      if (lastError?.code === 'ERR_MODULE_NOT_FOUND' && /'tsx'/.test(lastError?.message ?? '')) {
-        hints.push('Install workspace dependencies with "npm install --prefix zenith" to enable TypeScript fallbacks.');
+      const hints = [];
+      if (fs.existsSync(srcPath)) {
+        hints.push(
+          `Signals build not found at ${distPath}. Attempted to bundle TypeScript sources but the process failed.`
+        );
+        hints.push('Ensure dependencies are installed with "npm install --prefix zenith".');
+      } else {
+        hints.push(`Signals sources not found at ${srcPath}.`);
       }
       const error = new Error(hints.join(' '));
       error.cause = lastError;
