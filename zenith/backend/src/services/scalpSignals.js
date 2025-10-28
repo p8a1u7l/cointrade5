@@ -2,6 +2,7 @@ import '../utils/polyfills.js';
 import fs from 'fs';
 import path from 'path';
 import Module from 'node:module';
+import * as childProcess from 'node:child_process';
 import { Buffer } from 'node:buffer';
 import { fileURLToPath, pathToFileURL } from 'url';
 
@@ -9,12 +10,17 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(moduleDir, '../../..');
 const distRoot = path.resolve(repoRoot, 'dist');
 const distPath = path.resolve(distRoot, 'packages/signals/src/index.js');
+const tsconfigPath = path.resolve(repoRoot, 'tsconfig.json');
 const srcPath = path.resolve(repoRoot, 'packages/signals/src/index.ts');
 
 let cachedModulePromise = null;
 let aliasesRegistered = false;
 let esbuildPromise = null;
 let bundledModuleCache = null;
+let tscBuildPromise = null;
+const testOverrides = {
+  runTscBuild: null,
+};
 
 const aliasPrefixMap = [
   {
@@ -231,25 +237,88 @@ async function loadBundledSignalsModule() {
   }
 }
 
+function runTscBuild() {
+  if (typeof testOverrides.runTscBuild === 'function') {
+    return Promise.resolve().then(() => testOverrides.runTscBuild());
+  }
+
+  if (tscBuildPromise) {
+    return tscBuildPromise;
+  }
+
+  tscBuildPromise = new Promise((resolve, reject) => {
+    const compilerPath = path.resolve(repoRoot, 'node_modules/typescript/bin/tsc');
+    if (!fs.existsSync(compilerPath)) {
+      tscBuildPromise = null;
+      return reject(new Error(`TypeScript compiler not found at ${compilerPath}. Install dependencies with "npm install --prefix zenith".`));
+    }
+
+    const child = childProcess.spawn(process.execPath, [compilerPath, '-p', tsconfigPath], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+    });
+
+    child.once('error', (error) => {
+      tscBuildPromise = null;
+      reject(error);
+    });
+
+    child.once('exit', (code) => {
+      tscBuildPromise = null;
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`TypeScript compilation exited with code ${code}`));
+      }
+    });
+  });
+
+  return tscBuildPromise;
+}
+
+async function tryImportDistModule() {
+  if (!fs.existsSync(distPath)) {
+    return null;
+  }
+
+  try {
+    return await import(pathToFileURL(distPath).href);
+  } catch (error) {
+    throw error;
+  }
+}
+
 async function loadSignalsModule() {
   if (!cachedModulePromise) {
     cachedModulePromise = (async () => {
       registerRepoAliases();
-      const candidates = [];
-      if (fs.existsSync(distPath)) {
-        candidates.push({ type: 'js', path: distPath });
-      }
-      if (fs.existsSync(srcPath)) {
-        candidates.push({ type: 'bundle', path: srcPath });
+      let lastError = null;
+
+      try {
+        const distModule = await tryImportDistModule();
+        if (distModule) {
+          return distModule;
+        }
+      } catch (error) {
+        lastError = error;
       }
 
-      let lastError = null;
-      for (const candidate of candidates) {
+      const bundlerDisabled = process.env.SCALP_SIGNALS_DISABLE_ESBUILD === '1';
+      if (!bundlerDisabled && fs.existsSync(srcPath)) {
         try {
-          if (candidate.type === 'bundle') {
-            return await loadBundledSignalsModule();
+          return await loadBundledSignalsModule();
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      if (fs.existsSync(srcPath)) {
+        try {
+          await runTscBuild();
+          const distModule = await tryImportDistModule();
+          if (distModule) {
+            return distModule;
           }
-          return await import(pathToFileURL(candidate.path).href);
         } catch (error) {
           lastError = error;
         }
@@ -258,7 +327,7 @@ async function loadSignalsModule() {
       const hints = [];
       if (fs.existsSync(srcPath)) {
         hints.push(
-          `Signals build not found at ${distPath}. Attempted to bundle TypeScript sources but the process failed.`
+          `Signals build not found at ${distPath}. Attempted to compile TypeScript sources but the process failed.`
         );
         hints.push('Ensure dependencies are installed with "npm install --prefix zenith".');
       } else {
@@ -292,5 +361,21 @@ export async function updateScalpInterest(entries) {
   const mod = await loadSignalsModule();
   if (typeof mod.updateInterestHotlist === 'function') {
     mod.updateInterestHotlist(entries ?? []);
+  }
+}
+
+export function __resetScalpSignalsLoaderForTests() {
+  cachedModulePromise = null;
+  bundledModuleCache = null;
+  esbuildPromise = null;
+  tscBuildPromise = null;
+  testOverrides.runTscBuild = null;
+}
+
+export function __setScalpSignalsTestOverrides(overrides = {}) {
+  if (overrides && typeof overrides.runTscBuild === 'function') {
+    testOverrides.runTscBuild = overrides.runTscBuild;
+  } else {
+    testOverrides.runTscBuild = null;
   }
 }
